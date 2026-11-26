@@ -1,0 +1,2352 @@
+import { assetLabel } from "./asset-label"
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { Link, useNavigate } from "react-router-dom"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
+import {
+  AlertCircle,
+  ArrowDown,
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  ExternalLink,
+  Info,
+  Loader2,
+  LogOut,
+  ShieldCheck,
+  Wallet,
+  X,
+} from "lucide-react"
+import { formatUnits, parseUnits } from "viem"
+import { GIWA_ADMIN_ADDRESSES_RAW, GIWA_CHAIN_ID, GIWA_FAUCET_URL } from "./config"
+import { giwaApi, hasDeploymentAddresses } from "./api"
+import {
+  dripAllTestAssets,
+  readTokenBalance,
+  waitForSuccessfulReceipt,
+} from "./contracts"
+import { requiredPaymentInvariant } from "./operation-routing"
+import { computeQuote } from "./price-policy"
+import { displayAmount, type FlowOperation, type OperationReview } from "./operation-flow"
+import type {
+  GiwaActivity,
+  GiwaCatalogItem,
+  GiwaFeaturedCard,
+  GiwaPortfolio,
+  GiwaRedemption,
+  HexAddress,
+  UiPhase,
+} from "./types"
+import { explorerTx, useGiwaWallet } from "./wallet"
+import { tokenSymbolFor, vaultConfigOf, vaultDisplayName, vaultImageFor } from "./catalog"
+import { formatPercentFromBps, parseAumToNumber } from "./display-profile"
+import { compareNullLast } from "./sort"
+import { buildActivityFeed, type ActivityRow } from "./activity-feed"
+import { isVaultCategory, type VaultCategory } from "../../../shared/vault-taxonomy"
+import { isAdminAddress, parseAdminAddresses } from "./admin-access"
+import { GIWA_PREPROD_ROUTE, giwaProductPath } from "./routes"
+import { GiwaProductSearch } from "./GiwaProductSearch"
+import { BAR_ICON_SLOT, BAR_ITEM, BAR_LABEL, NAV_FOCUS, RAIL_TAB } from "./nav-ui"
+import { NETWORK_COPY, SwitchToGiwaButton, switchFailureMessage, waitForWallet } from "./wallet-network"
+import { BrandMark } from "../components/BrandMark"
+import { ListedFundRow, RateCell } from "./ListedFundRow"
+import { RISK_LABEL, RiskTag, vaultCategoryRisk, type RiskLevel } from "./RiskTag"
+import { DEPLOYED_FUND_METRICS, metricCaption, type ListedFund } from "./listed-funds"
+import { CATEGORY_TITLES, categoryTitle } from "./fund-categories"
+import { ASSET_MANAGERS, ISSUERS, aumLabel, apyLabel, productById } from "../data/products"
+import { GiwaMultiSelect } from "./GiwaMultiSelect"
+import { SavingsAssetPicker } from "./SavingsAssetPicker"
+import type { SavingsAssetChoice } from "./savings-assets"
+import { savingsGoldCoin } from "./savings-category"
+import {
+  amountAfterSwapFee,
+  payAssetForOption,
+  payAssetLogo,
+  payAssetOptionKey,
+  stablecoinSwapFee,
+  type PayAssetOption,
+} from "./arcousd-buy"
+import {
+  AmountBlock,
+  AmountField,
+  INVEST_CTA,
+  INVEST_CTA_BUSY,
+  INVEST_CTA_READY,
+  INVEST_NOTICE,
+  INVEST_PANEL_CARD,
+  INVEST_TAB,
+  INVEST_TAB_ACTIVE,
+  INVEST_TAB_INACTIVE,
+  INVEST_TAB_TRACK,
+  InfoRow,
+} from "./invest-panel-ui"
+
+// VISIBILITY gate only (not security): the admin nav link is shown solely to allowlisted
+// wallets. Real enforcement is server requireOperator + on-chain FEED_ADMIN_ROLE.
+const ADMIN_ALLOWLIST = parseAdminAddresses(GIWA_ADMIN_ADDRESSES_RAW)
+
+// Canonical taxonomy lives in shared/vault-taxonomy.ts (single source across §2 config,
+// the 2c-2 deploy-params schema, and the server validation drift test).
+export type GiwaCategory = VaultCategory
+export type GiwaFilters = {
+  category: GiwaCategory[]
+  denomination: string[]
+  issuer: string[]
+  network: string[]
+  search: string
+}
+
+export const GIWA_EMPTY_FILTERS: GiwaFilters = {
+  category: [],
+  denomination: [],
+  issuer: [],
+  network: [],
+  search: "",
+}
+
+const HEAD = "px-1.5 py-2.5 text-sm font-normal text-[var(--color-arco-text)]"
+const PRODUCT_COLS =
+  "grid-cols-[minmax(190px,1.55fr)_0.72fr_0.7fr_0.9fr_0.9fr_0.6fr]"
+const HOLDING_COLS =
+  "grid-cols-[minmax(180px,1.5fr)_0.8fr_1.05fr_0.9fr_0.65fr_0.6fr]"
+const ACTIVITY_COLS =
+  "grid-cols-[0.85fr_minmax(160px,1.3fr)_0.8fr_0.85fr_0.9fr_0.6fr]"
+
+// Full category metadata (title/bg) for ALL taxonomy values — single-sources
+// categoryTitle for every category, including ones hidden from the investor Strategies section.
+// `hidden` keeps a valid category (still selectable in admin) out of the investor cards + filter.
+const STRATEGIES: Array<{
+  category: GiwaCategory
+  title: string
+  bg: string
+  hidden?: boolean
+}> = [
+  {
+    category: "U.S Treasuries",
+    title: CATEGORY_TITLES["U.S Treasuries"],
+    bg: "var(--color-strategy-treasuries)",
+  },
+  {
+    category: "Prime Credit",
+    title: CATEGORY_TITLES["Prime Credit"],
+    bg: "var(--color-strategy-credit)",
+  },
+  {
+    // Valid everywhere (admin dropdown, taxonomy) but hidden from the investor Strategies
+    // section; operators hide the Arco Saving vaults themselves.
+    category: "Arco Saving",
+    title: CATEGORY_TITLES["Arco Saving"],
+    bg: "var(--color-strategy-saving)",
+    hidden: true,
+  },
+  {
+    category: "Equity Exposure",
+    title: CATEGORY_TITLES["Equity Exposure"],
+    bg: "var(--color-strategy-equity)",
+  },
+]
+
+// The Strategies section and the investor category filter both consult these — the visible
+// categories (Arco Saving excluded), in canonical order.
+const VISIBLE_STRATEGIES = STRATEGIES.filter((strategy) => !strategy.hidden)
+const INVESTOR_CATEGORIES: GiwaCategory[] = VISIBLE_STRATEGIES.map((strategy) => strategy.category)
+
+// Strategies cards are named by risk tier; the sentence says which product types the tier covers.
+const RISK_CARD_BLURB: Record<RiskLevel, string> = {
+  low: "U.S. Treasury and cash management funds.",
+  medium: "Investment-grade bonds and private credit.",
+  high: "Equity funds in the U.S., Japan and Taiwan.",
+}
+
+const TOKEN_ICONS: Record<string, string> = {
+  abtc: "/logos/abtc.png",
+  // The ArcoGOLD Savings token (the gold account's share).
+  arcogold: "/logos/arcogold.png",
+  aeth: "/logos/aeth.png",
+  acapix: "/logos/aksia.svg",
+  ibenji: "/logos/ibenji.svg",
+  umint: "/logos/umint.svg",
+}
+
+function compactNumber(n: number, max = 2) {
+  return Number(n.toFixed(max)).toLocaleString("en-US", { maximumFractionDigits: max })
+}
+
+// Trim an estimated quote/price to <=6 decimals, dropping trailing zeros (e.g. 1.000000 -> "1").
+function quoteText(n: number): string {
+  return n.toFixed(6).replace(/\.?0+$/, "")
+}
+
+function moneyLabel(n: number | null | undefined) {
+  if (n === undefined || n === null || Number.isNaN(n)) return "--"
+  if (n >= 1_000_000_000) return `$${compactNumber(n / 1_000_000_000)}B`
+  if (n >= 1_000_000) return `$${compactNumber(n / 1_000_000)}M`
+  if (n >= 1_000) return `$${compactNumber(n / 1_000)}K`
+  return `$${compactNumber(n)}`
+}
+
+function tokenLabel(value: unknown, symbol: string) {
+  if (typeof value === "string" && value.trim()) return `${value} ${symbol}`
+  if (typeof value === "number") return `${compactNumber(value, 6)} ${symbol}`
+  return `-- ${symbol}`
+}
+
+function shortAddr(address: string | null | undefined) {
+  if (!address) return "--"
+  return `${address.slice(0, 6)}...${address.slice(-4)}`
+}
+
+function tokenIcon(productId: string) {
+  return TOKEN_ICONS[productId.toLowerCase()]
+}
+
+export function paymentAssetIcon(symbol: string) {
+  if (symbol === "tUSDC") return "/logos/usdc.svg"
+  // The coin itself (Bitcoin's own mark); abtc.png is the aBTC savings token.
+  if (symbol === "tBTC") return "/logos/bitcoin.svg"
+  if (symbol === "tWETH") return "/logos/aeth.png"
+  if (symbol === "tXRP") return "/logos/XRP.png"
+  if (symbol === "ArcoUSD") return "/logos/arco.png"
+  // The gold coins (PAXG, XAUT) and their GIWA test coins (tPAXG, tXAUT).
+  return savingsGoldCoin(symbol)?.logo
+}
+
+// The category a vault falls back to when no operator override is set (Vault Config "inherit").
+export function defaultProductCategory(product: Pick<GiwaCatalogItem, "productId" | "paymentAssetSymbol">): GiwaCategory {
+  const id = product.productId.toLowerCase()
+  if (id === "acapix") return "Prime Credit"
+  if (product.paymentAssetSymbol === "tBTC" || product.paymentAssetSymbol === "tXRP" || product.paymentAssetSymbol === "tWETH") {
+    return "Arco Saving"
+  }
+  return "U.S Treasuries"
+}
+
+function productCategory(
+  product: Pick<GiwaCatalogItem, "productId" | "symbol" | "paymentAssetSymbol" | "vaultConfig">,
+): GiwaCategory {
+  // Operator override first (server-validated against this same taxonomy), then the
+  // built-in derivation.
+  const override = vaultConfigOf(product).category
+  if (isVaultCategory(override)) return override
+  return defaultProductCategory(product)
+}
+
+function productType(product: Pick<GiwaCatalogItem, "productId" | "paymentAssetSymbol">) {
+  const id = product.productId.toLowerCase()
+  if (id === "acapix") return "Private Credit"
+  if (product.paymentAssetSymbol === "tBTC" || product.paymentAssetSymbol === "tXRP" || product.paymentAssetSymbol === "tWETH") return "Arco Saving"
+  return "Money Market Fund"
+}
+
+function productBlurb(product: GiwaCatalogItem) {
+  return `${product.name} on GIWA Sepolia, accepting ${assetLabel(product.paymentAssetSymbol)} only through the registry-bound vaults.`
+}
+
+function networkLabel(chainId?: number | null) {
+  if (!chainId) return "Not connected"
+  return chainId === GIWA_CHAIN_ID ? "GIWA Sepolia" : `Wrong network ${chainId}`
+}
+
+function positionProductId(position: unknown) {
+  return typeof position === "object" && position !== null && "productId" in position
+    ? String((position as { productId?: unknown }).productId)
+    : ""
+}
+
+function positionValue(position: unknown, key: string) {
+  return typeof position === "object" && position !== null && key in position
+    ? (position as Record<string, unknown>)[key]
+    : undefined
+}
+
+function statusTone(phase: UiPhase) {
+  const good = phase === "ready" || phase === "success" || phase === "claimable"
+  const bad = phase === "failed" || phase === "wrong-network" || phase === "missing-gas" || phase === "missing-payment-token"
+  return { good, bad }
+}
+
+function SortChevrons({ active }: { active?: "asc" | "desc" }) {
+  return (
+    <span className="flex flex-col">
+      <ChevronUp className={`size-3 text-[var(--color-arco-text)] ${active === "asc" ? "opacity-100" : "opacity-30"}`} />
+      <ChevronDown className={`-mt-1 size-3 text-[var(--color-arco-text)] ${active === "desc" ? "opacity-100" : "opacity-30"}`} />
+    </span>
+  )
+}
+
+export function uniquePaymentAssets(products: GiwaCatalogItem[]) {
+  const seen = new Set<string>()
+  const assets: Array<{
+    symbol: string
+    name: string
+    decimals: number
+    address: HexAddress
+    faucet: HexAddress | null
+  }> = []
+  for (const product of products) {
+    if (!product.paymentAssetAddress || seen.has(product.paymentAssetAddress.toLowerCase())) continue
+    seen.add(product.paymentAssetAddress.toLowerCase())
+    assets.push({
+      symbol: product.paymentAssetSymbol,
+      name: product.paymentAsset?.name ?? product.paymentAssetSymbol,
+      decimals: product.paymentAsset?.decimals ?? 18,
+      address: product.paymentAssetAddress,
+      faucet: (product.paymentAsset?.faucetAddress ?? product.paymentAsset?.faucet ?? null) as HexAddress | null,
+    })
+  }
+  return assets
+}
+
+/** Adds the Reserve's stablecoins that no product pays with (same faucet as the product assets). */
+export function withReserveTestAssets(
+  assets: ReturnType<typeof uniquePaymentAssets>,
+  reserveAssets: readonly { symbol: string; address: string; decimals: number }[],
+): ReturnType<typeof uniquePaymentAssets> {
+  const faucet = assets.find((asset) => asset.faucet)?.faucet ?? null
+  const seen = new Set(assets.map((asset) => asset.address.toLowerCase()))
+  const extra = reserveAssets
+    .filter((asset) => /^0x[0-9a-fA-F]{40}$/.test(asset.address) && !seen.has(asset.address.toLowerCase()))
+    .map((asset) => ({ symbol: asset.symbol, name: asset.symbol, decimals: asset.decimals, address: asset.address as HexAddress, faucet }))
+  return [...assets, ...extra]
+}
+
+// Listed funds under the shared filters, matched like the deployed vaults: category, USD
+// denomination (USDC base asset), issuer, and network (GIWA, where every catalog row is shown,
+// plus the chains the issuer lists for the token).
+export function applyListedFilters(funds: readonly ListedFund[], filters: GiwaFilters): ListedFund[] {
+  return funds.filter((fund) => {
+    if (filters.category.length && !filters.category.includes(fund.category)) return false
+    if (filters.denomination.length && !filters.denomination.includes("USD")) return false
+    if (filters.issuer.length && !filters.issuer.includes(fund.issuerKey)) return false
+    if (filters.network.length && !listedFundNetworks(fund).some((network) => filters.network.includes(network))) return false
+    return true
+  })
+}
+
+function listedFundNetworks(fund: ListedFund): string[] {
+  return ["Giwa", ...fund.token.networks]
+}
+
+export function applyGiwaFilters(products: GiwaCatalogItem[], filters: GiwaFilters) {
+  const query = filters.search.trim().toLowerCase()
+  return products.filter((product) => {
+    if (filters.category.length && !filters.category.includes(productCategory(product))) return false
+    if (filters.denomination.length && !filters.denomination.includes(denominationOf(product))) return false
+    if (filters.issuer.length && !filters.issuer.includes(legacyProfile(product).issuer ?? "")) return false
+    if (filters.network.length && !networksOf(product).some((network) => filters.network.includes(network))) return false
+    if (!query) return true
+    return [
+      product.productId,
+      product.symbol,
+      product.name,
+      product.paymentAssetSymbol,
+      product.paymentAssetAddress,
+      product.productTokenAddress,
+      product.depositVaultAddress,
+      product.redemptionVaultAddress,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase()
+      .includes(query)
+  })
+}
+
+export function StatusPill({ phase }: { phase: UiPhase }) {
+  const tone = statusTone(phase)
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium ring-1 ${
+        tone.good
+          ? "bg-emerald-50 text-emerald-700 ring-emerald-200"
+          : tone.bad
+            ? "bg-red-50 text-red-700 ring-red-200"
+            : "bg-[var(--color-arco-chip)] text-[var(--color-arco-text-soft)] ring-[var(--color-arco-border)]"
+      }`}
+    >
+      {tone.good ? <CheckCircle2 className="size-3" /> : tone.bad ? <AlertCircle className="size-3" /> : <Loader2 className="size-3" />}
+      {phase.replace(/-/g, " ")}
+    </span>
+  )
+}
+
+export function GiwaBrandMark({
+  src,
+  label,
+  size = 20,
+  shape = "round",
+  className = "",
+}: {
+  src?: string
+  label: string
+  size?: number
+  shape?: "round" | "rounded"
+  className?: string
+}) {
+  const [broken, setBroken] = useState(false)
+  const radius = shape === "round" ? "9999px" : "6px"
+  const initial = (label.trim().charAt(0) || "?").toUpperCase()
+
+  if (src && !broken) {
+    return (
+      <img
+        src={src}
+        alt={label}
+        title={label}
+        width={size}
+        height={size}
+        onError={() => setBroken(true)}
+        className={`shrink-0 object-contain ${className}`}
+        style={{ width: size, height: size, borderRadius: radius }}
+      />
+    )
+  }
+
+  return (
+    <span
+      aria-hidden
+      title={label}
+      className={`inline-flex shrink-0 items-center justify-center font-semibold ${className}`}
+      style={{
+        width: size,
+        height: size,
+        borderRadius: radius,
+        background: "var(--color-arco-chip)",
+        color: "var(--color-arco-chip-ink)",
+        fontSize: size * 0.46,
+        lineHeight: 1,
+      }}
+    >
+      {initial}
+    </span>
+  )
+}
+
+export function GiwaNetworkIcon({ size = 20 }: { size?: number }) {
+  return (
+    <span title="GIWA Sepolia" className="inline-flex shrink-0" style={{ width: size, height: size }}>
+      <img src="/logos/giwa.png" alt="GIWA" width={size} height={size} className="rounded-full object-contain" />
+    </span>
+  )
+}
+
+export function GiwaWalletButton() {
+  const wallet = useGiwaWallet()
+
+  if (wallet.connected && wallet.address) {
+    const onGiwa = wallet.chainId === GIWA_CHAIN_ID
+    // On another network a phone's chip carries the switch button and Disconnect (the address comes back from sm), so
+    // the top bar still fits at 320px.
+    const phoneHidden = onGiwa ? "" : "hidden sm:inline-flex"
+    return (
+      <div className={`inline-flex h-8 items-center gap-2 rounded-full bg-[var(--color-arco-surface)] py-1 pl-1 shadow-[var(--shadow-control)] ${onGiwa ? "pr-2" : "pr-1 sm:pr-2"}`}>
+        {onGiwa ? (
+          <span className="rounded-full bg-[var(--color-arco-chip)] px-2 py-0.5 text-xs text-[var(--color-arco-text-soft)]">GIWA</span>
+        ) : (
+          <SwitchToGiwaButton wallet={wallet} />
+        )}
+        <span className={`font-mono text-xs text-[var(--color-arco-muted)] ${phoneHidden}`}>{shortAddr(wallet.address)}</span>
+        <button
+          type="button"
+          aria-label="Disconnect wallet"
+          className={`inline-flex size-6 shrink-0 items-center justify-center rounded-full text-[var(--color-arco-muted)] hover:bg-[var(--color-arco-chip)]`}
+          onClick={wallet.disconnect}
+        >
+          <LogOut className="size-3.5" />
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <button
+      type="button"
+      className="inline-flex h-9 items-center gap-2 rounded-md bg-[var(--color-arco-ink)] px-3 text-sm font-medium text-[var(--color-arco-cream)] lg:h-12 lg:px-6 lg:text-base"
+      onClick={() => void wallet.connect()}
+    >
+      <Wallet className="size-4" />
+      Connect Wallet
+    </button>
+  )
+}
+
+const FAUCET_COOLDOWN_MS = 24 * 60 * 60 * 1000
+const FAUCET_LAST_MINT_PREFIX = "arco.giwa.faucetLastMint."
+
+function faucetLastMintKey(address: string) {
+  return `${FAUCET_LAST_MINT_PREFIX}${address.toLowerCase()}`
+}
+
+function readFaucetLastMint(address: string): number | null {
+  try {
+    const raw = window.localStorage.getItem(faucetLastMintKey(address))
+    if (!raw) return null
+    const value = Number(raw)
+    return Number.isFinite(value) ? value : null
+  } catch {
+    return null
+  }
+}
+
+function writeFaucetLastMint(address: string, at: number) {
+  try {
+    window.localStorage.setItem(faucetLastMintKey(address), String(at))
+  } catch {
+    /* ignore storage failures */
+  }
+}
+
+const MINT_COPY = { confirm: "Confirm in your wallet" } as const
+/** How long Mint test assets waits for a connection the press opened (the user picks a wallet meanwhile). */
+const MINT_CONNECT_TIMEOUT_MS = 120_000
+/** How long it waits, after the wallet says it switched, for the app to see GIWA and be able to sign there. */
+const MINT_SWITCH_SETTLE_MS = 15_000
+
+function formatRemaining(ms: number): string {
+  const totalMinutes = Math.max(1, Math.ceil(ms / 60000))
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  if (hours > 0) return `${hours}h ${minutes}m`
+  return `${minutes}m`
+}
+
+/**
+ * Mint test assets. `rail`: the desktop rail's Mint item under Convert, its notice a dismissible popover to the rail's
+ * right. `bar`: the phone tab bar's Mint item, its notice a dismissible sheet just above the bar.
+ */
+export function TestFundsButton({ admin = false, look }: { admin?: boolean; look: "rail" | "bar" }) {
+  const wallet = useGiwaWallet()
+  const queryClient = useQueryClient()
+  const catalogQuery = useQuery({ queryKey: ["giwa", "catalog"], queryFn: giwaApi.catalog, enabled: !admin })
+  // ArcoUSD test stablecoins (tUSDT, tRLUSD) are not any product's payment asset; the Reserve
+  // lists them. dripAll already mints every configured faucet asset — this only lists their
+  // balances and covers the per-asset fallback.
+  const reserveQuery = useQuery({ queryKey: ["giwa", "arcousd", "reserve"], queryFn: () => giwaApi.arcousd.reserve(), enabled: !admin })
+  // The gold test coins (tPAXG, tXAUT) the gold Reserve lists once ArcoGOLD is deployed: the same faucet drips them.
+  // Before the gold deploy this read answers "not-deployed" (or fails on an older API) and adds nothing.
+  const goldReserveQuery = useQuery({ queryKey: ["giwa", "arcogold", "reserve"], queryFn: () => giwaApi.arcogold.reserve(), enabled: !admin, retry: 1 })
+  const assets = useMemo(
+    () =>
+      withReserveTestAssets(
+        withReserveTestAssets(uniquePaymentAssets(catalogQuery.data ?? []), reserveQuery.data?.reserve?.assets ?? []),
+        goldReserveQuery.data?.reserve?.assets ?? [],
+      ),
+    [catalogQuery.data, reserveQuery.data, goldReserveQuery.data],
+  )
+  const faucet = assets.find((asset) => asset.faucet)?.faucet ?? null
+  const [phase, setPhase] = useState<UiPhase>("ready")
+  const [message, setMessage] = useState<string | null>(null)
+  const [cooldownNotice, setCooldownNotice] = useState<string | null>(null)
+  const [balances, setBalances] = useState<Array<[string, string]>>([])
+  // Waiting on the wallet (connect, network switch, the mint's signature) and what it waits for.
+  const [waiting, setWaiting] = useState(false)
+  const [status, setStatus] = useState<string | null>(null)
+  // The wallet as it is now: a connect or a switch lands a render after its promise.
+  const walletRef = useRef(wallet)
+  walletRef.current = wallet
+  // The rail's notice is a popover fixed beside the rail (the rail's middle scrolls on a short screen and would clip
+  // anything inside it), next to the Mint item and kept on screen.
+  const hasNotice = Boolean(status || cooldownNotice || message || balances.length > 0)
+  const itemRef = useRef<HTMLButtonElement>(null)
+  const noticeRef = useRef<HTMLDivElement>(null)
+  const [noticeTop, setNoticeTop] = useState(8)
+  useLayoutEffect(() => {
+    if (look !== "rail" || !hasNotice) return
+    const place = () => {
+      const anchor = itemRef.current?.getBoundingClientRect().top ?? 8
+      const height = noticeRef.current?.offsetHeight ?? 0
+      setNoticeTop(Math.max(8, Math.min(anchor, window.innerHeight - height - 8)))
+    }
+    place()
+    window.addEventListener("resize", place)
+    return () => window.removeEventListener("resize", place)
+  }, [look, hasNotice, status, cooldownNotice, message, balances.length])
+
+  // Auto-dismiss the cooldown notice after 5 seconds.
+  useEffect(() => {
+    if (!cooldownNotice) return
+    const timer = setTimeout(() => setCooldownNotice(null), 5000)
+    return () => clearTimeout(timer)
+  }, [cooldownNotice])
+
+  if (admin) return null
+
+  async function mintFunds() {
+    setMessage(null)
+    setBalances([])
+    setCooldownNotice(null)
+    setWaiting(true)
+    try {
+      let current = walletRef.current
+      // Not connected: connect, then carry on in the same press once the wallet has an account (and its chain).
+      if (!current.address) {
+        setStatus(MINT_COPY.confirm)
+        await current.connect()
+        const connected = await waitForWallet(walletRef, (next) => Boolean(next.address) && next.chainId !== null, MINT_CONNECT_TIMEOUT_MS)
+        current = connected ?? walletRef.current
+        if (!current.address) {
+          // The sign-in was closed or failed: the wallet says why (its error), nothing is minted.
+          if (current.error) {
+            setPhase("failed")
+            setMessage(current.error)
+          }
+          return
+        }
+      }
+      // Another network: switch, then carry on once the wallet reports GIWA and can sign there.
+      if (current.chainId !== GIWA_CHAIN_ID) {
+        setStatus(NETWORK_COPY.approve)
+        const result = await current.switchToGiwa()
+        if (!result.ok) {
+          setPhase("failed")
+          setMessage(switchFailureMessage(result))
+          return
+        }
+        const switched = await waitForWallet(walletRef, (next) => next.chainId === GIWA_CHAIN_ID && next.signingReady, MINT_SWITCH_SETTLE_MS)
+        if (!switched?.address) {
+          setPhase("failed")
+          setMessage(NETWORK_COPY.failed("the wallet did not report GIWA Sepolia."))
+          return
+        }
+        current = switched
+      }
+      const account = current.address!
+      if (!faucet) throw new Error("Faucet address is missing from the registry")
+      // Pre-empt the 24h faucet cooldown on the client so we don't spend gas on a
+      // tx the contract will revert. Show a transient notice instead.
+      const lastMint = readFaucetLastMint(account)
+      if (lastMint !== null) {
+        const elapsed = Date.now() - lastMint
+        if (elapsed < FAUCET_COOLDOWN_MS) {
+          const remaining = FAUCET_COOLDOWN_MS - elapsed
+          setCooldownNotice(
+            `Today's minting is done. Please wait ${formatRemaining(remaining)} before minting test assets again.`,
+          )
+          return
+        }
+      }
+      const tokens = assets.map((asset) => asset.address)
+      setPhase("submitting")
+      setStatus(MINT_COPY.confirm)
+      const result = await dripAllTestAssets({ account, faucet, tokens })
+      setStatus(null)
+      setPhase("confirming")
+      for (const hash of result.hashes) {
+        await waitForSuccessfulReceipt(hash)
+      }
+      const nextBalances = await Promise.all(
+        assets.map(async (asset) => [
+          asset.symbol,
+          await readTokenBalance(asset.address, account, asset.decimals),
+        ] as [string, string]),
+      )
+      setBalances(nextBalances)
+      await queryClient.invalidateQueries({ queryKey: ["giwa", "payment-balances", account] })
+      await walletRef.current.refreshBalance()
+      writeFaucetLastMint(account, Date.now())
+      setPhase("success")
+      setMessage(
+        result.mode === "dripAll"
+          ? "Minted all configured test assets in one transaction."
+          : `dripAll is not active on this faucet yet; used per-asset fallback. ${result.fallbackReason}`,
+      )
+    } catch (err) {
+      setPhase("failed")
+      setMessage(err instanceof Error ? err.message : String(err))
+    } finally {
+      setStatus(null)
+      setWaiting(false)
+    }
+  }
+
+  const busy = waiting || phase === "submitting" || phase === "confirming"
+  const rail = look === "rail"
+  function dismiss() {
+    setMessage(null)
+    setBalances([])
+    setCooldownNotice(null)
+    setPhase("ready")
+  }
+  // A live region that is always there (so its first message is announced); drawn only when it has something to say.
+  const notice = (
+    <div
+      ref={noticeRef}
+      role="status"
+      data-mint-notice=""
+      style={hasNotice ? (rail ? { top: noticeTop } : { bottom: BAR_NOTICE_BOTTOM }) : undefined}
+      className={
+        hasNotice
+          ? `fixed z-50 rounded-[var(--radius-strategy)] bg-[var(--color-arco-surface)] p-3 pr-9 text-xs shadow-[var(--shadow-savings-popover)] ${
+              rail ? "left-[100px] w-[280px]" : "inset-x-3 mx-auto max-w-[536px] text-sm"
+            }`
+          : "sr-only"
+      }
+    >
+      {status && (
+        <p className="flex items-center gap-2 text-[var(--color-arco-ink)]">
+          <Loader2 aria-hidden="true" className="size-3.5 shrink-0 animate-spin" />
+          {status}
+        </p>
+      )}
+      {cooldownNotice && <p className="text-[var(--color-arco-ink)]">{cooldownNotice}</p>}
+      {message && <p className={phase === "failed" ? "text-red-700" : "text-[var(--color-arco-text-soft)]"}>{message}</p>}
+      {balances.length > 0 && (
+        <dl className="mt-2 space-y-1">
+          {balances.map(([symbol, balance]) => (
+            <div key={symbol} className="flex items-center justify-between">
+              <dt className="text-[var(--color-arco-muted)]">{symbol}</dt>
+              <dd className="tabular-nums text-[var(--color-arco-ink)]">{balance}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      {hasNotice && !busy && (
+        <button
+          type="button"
+          aria-label="Dismiss"
+          onClick={dismiss}
+          className={`absolute right-2 top-2 inline-flex size-6 items-center justify-center rounded-[var(--radius-pill)] text-[var(--color-arco-muted)] hover:bg-[var(--color-row-hover-weak)] hover:text-[var(--color-arco-ink)] ${NAV_FOCUS}`}
+        >
+          <X aria-hidden="true" className="size-3.5" />
+        </button>
+      )}
+    </div>
+  )
+  if (rail) {
+    // The rail's Mint item, under Convert: the arrow (a spinner while it works) over its label, in ink like Convert.
+    return (
+      <div>
+        <button
+          ref={itemRef}
+          type="button"
+          disabled={busy || catalogQuery.isLoading}
+          aria-busy={busy || undefined}
+          aria-label="Mint test assets"
+          onClick={() => void mintFunds()}
+          className={`${RAIL_TAB} font-medium text-[var(--color-arco-ink)] hover:bg-[var(--color-row-hover-weak)] disabled:cursor-progress ${NAV_FOCUS}`}
+        >
+          {busy ? (
+            <Loader2 aria-hidden="true" size={20} strokeWidth={1.8} className="shrink-0 animate-spin" />
+          ) : (
+            <ArrowDown aria-hidden="true" size={20} strokeWidth={1.8} className="shrink-0" />
+          )}
+          {busy ? "Minting" : "Mint"}
+        </button>
+        {notice}
+      </div>
+    )
+  }
+  // The tab bar's Mint item, after Convert: the arrow (a spinner while it works) over "Mint", which stays put so the bar
+  // does not move.
+  return (
+    <>
+      <button
+        type="button"
+        disabled={busy || catalogQuery.isLoading}
+        aria-busy={busy || undefined}
+        aria-label="Mint test assets"
+        onClick={() => void mintFunds()}
+        className={`${BAR_ITEM} font-medium text-[var(--color-arco-ink)] disabled:cursor-progress ${NAV_FOCUS}`}
+      >
+        <span className={BAR_ICON_SLOT}>
+          {busy ? (
+            <Loader2 aria-hidden="true" size={20} strokeWidth={1.8} className="shrink-0 animate-spin" />
+          ) : (
+            <ArrowDown aria-hidden="true" size={20} strokeWidth={1.8} className="shrink-0" />
+          )}
+        </span>
+        <span className={BAR_LABEL}>Mint</span>
+      </button>
+      {notice}
+    </>
+  )
+}
+
+/** The bar's notice sits 12px above the tab bar (which already clears the safe area): --giwa-tab-bar-space. */
+const BAR_NOTICE_BOTTOM = "calc(var(--giwa-tab-bar-space, 0px) + 0.75rem)"
+
+// VISIBILITY only (see ADMIN_ALLOWLIST): shows the Admin nav item to allowlisted wallets.
+export function useGiwaIsAdmin(): boolean {
+  const { address } = useGiwaWallet()
+  return isAdminAddress(address, ADMIN_ALLOWLIST)
+}
+
+// Top bar of the investor shell, inside the content panel. From xl: the search centred, the wallet at the right (the
+// nav lives in the rail, GiwaNavRail). Below xl: the logo, the search and the wallet; the pages, Convert and Mint are in
+// the bottom tab bar, Documentation, Terms of Use (and Admin for allowlisted wallets) in the page footer. Height stays 76px at every width:
+// SectionNav (top-[76px]) and the invest panel (top-[104px]) stick beneath it.
+export function GiwaHeader() {
+  return (
+    <header className="sticky top-0 z-40 border-b border-[var(--color-arco-border)] bg-[var(--color-arco-page-80)] backdrop-blur xl:rounded-tl-[var(--radius-funds-hero)]">
+      <div className="mx-auto flex min-h-[76px] w-full max-w-[1512px] items-center justify-between gap-2 sm:gap-3 px-4 md:px-8 xl:grid xl:grid-cols-[minmax(0,1fr)_minmax(0,560px)_minmax(0,1fr)]">
+        <Link
+          to={GIWA_PREPROD_ROUTE}
+          aria-label="Arco home"
+          className="flex shrink-0 items-center rounded-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-arco-ink)] xl:hidden"
+        >
+          <img src="/arco-icon.svg" alt="Arco" className="h-[33px] w-[35px] shrink-0" />
+        </Link>
+        <div className="ml-auto w-9 shrink-0 sm:ml-0 sm:w-full sm:min-w-0 sm:max-w-[448px] sm:shrink xl:col-start-2 xl:max-w-none">
+          <GiwaProductSearch />
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5 sm:ml-auto sm:gap-2 xl:col-start-3 xl:justify-self-end">
+          <GiwaWalletButton />
+        </div>
+      </div>
+    </header>
+  )
+}
+
+export function GiwaFeaturedCarousel({ cards, catalog }: { cards: GiwaFeaturedCard[]; catalog: GiwaCatalogItem[] }) {
+  const navigate = useNavigate()
+  const byId = new Map(catalog.map((product) => [product.productId, product]))
+  // `cards` arrive shown-only + position-ordered from the server. Join each to its vault and
+  // DROP any whose vault is absent from the (non-hidden) catalog — a de-registered or
+  // now-hidden vault must never surface in the carousel. Cap at 3.
+  const items = cards
+    .map((card) => ({ card, product: byId.get(card.productId) }))
+    .filter((entry): entry is { card: GiwaFeaturedCard; product: GiwaCatalogItem } => Boolean(entry.product))
+    .slice(0, 3)
+  const [index, setIndex] = useState(0)
+  const active = items[index] ?? items[0]
+
+  if (!active) return null
+
+  const { card, product } = active
+
+  return (
+    <section className="space-y-3">
+      <button
+        type="button"
+        onClick={() => navigate(giwaProductPath(product.productId))}
+        className="relative flex h-[189px] w-full items-center overflow-hidden rounded-[8px] bg-[var(--color-arco-hero)] px-12 text-left"
+      >
+        <img
+          src="/carousel-bg.png"
+          alt=""
+          className="pointer-events-none absolute right-0 top-0 h-full w-[300px] object-cover"
+          style={{
+            WebkitMaskImage: "linear-gradient(to left, #000 55%, transparent 100%)",
+            maskImage: "linear-gradient(to left, #000 55%, transparent 100%)",
+          }}
+        />
+        <div className="relative z-10 flex items-center gap-7">
+          <GiwaBrandMark
+            src={vaultImageFor(product)}
+            label={product.symbol}
+            size={90}
+            className="bg-[var(--color-arco-hero-deco-2)]"
+          />
+          <div className="max-w-[460px]">
+            <h2 className="text-2xl font-bold leading-tight text-[var(--color-arco-cream)]">{vaultDisplayName(product)}</h2>
+            <p className="mt-2 text-sm leading-5 text-[var(--color-arco-cream)]">{card.about?.trim() || productBlurb(product)}</p>
+          </div>
+        </div>
+      </button>
+      {items.length > 1 && (
+        <div className="flex justify-center gap-2">
+          {items.map(({ product: item }, itemIndex) => (
+            <button
+              key={item.productId}
+              type="button"
+              aria-label={`Show ${vaultDisplayName(item)}`}
+              aria-current={itemIndex === index}
+              onClick={() => setIndex(itemIndex)}
+              className="grid h-8 place-items-center px-1"
+            >
+              <span
+                className="size-2 rounded-full transition-colors"
+                style={{
+                  background: itemIndex === index ? "var(--color-arco-dot-active)" : "var(--color-arco-dot-inactive)",
+                }}
+              />
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
+export function GiwaStrategyCards({
+  products,
+  listedFunds = [],
+  active,
+  onToggle,
+}: {
+  products: GiwaCatalogItem[]
+  listedFunds?: readonly ListedFund[]
+  active: GiwaCategory[]
+  onToggle: (category: GiwaCategory) => void
+}) {
+  return (
+    <section className="space-y-3">
+      <h2 className="pl-1 text-lg font-medium text-[var(--color-arco-ink)]">Strategies</h2>
+      <div className="flex gap-3 overflow-x-auto pb-1">
+        {VISIBLE_STRATEGIES.map((strategy) => {
+          const selected = active.includes(strategy.category)
+          const risk = vaultCategoryRisk(strategy.category)
+          if (!risk) return null
+          const count =
+            products.filter((product) => productCategory(product) === strategy.category).length +
+            listedFunds.filter((fund) => fund.category === strategy.category).length
+          return (
+            <button
+              key={strategy.category}
+              type="button"
+              aria-pressed={selected}
+              onClick={() => onToggle(strategy.category)}
+              className={`flex min-w-[240px] flex-1 flex-col items-start justify-between rounded-[12px] p-4 text-left transition-[box-shadow,transform] duration-150 ${
+                selected ? "ring-2 ring-[var(--color-arco-cream-70)] ring-offset-2 ring-offset-[var(--color-arco-page)]" : "hover:brightness-110"
+              }`}
+              style={{ background: strategy.bg, height: 136 }}
+            >
+              <div className="space-y-1">
+                <h3 className="text-lg font-medium leading-6 text-[var(--color-arco-cream)]">{RISK_LABEL[risk]}</h3>
+                <p className="line-clamp-2 h-10 max-w-[280px] text-sm leading-5 text-[var(--color-arco-cream)] opacity-80">
+                  {RISK_CARD_BLURB[risk]}
+                </p>
+              </div>
+              <span className="rounded-[4px] bg-[var(--color-arco-overlay)] px-1 py-0.5 text-xs font-medium text-[var(--color-arco-cream)]">
+                {`${count} ${count === 1 ? "Product" : "Products"}`}
+              </span>
+            </button>
+          )
+        })}
+      </div>
+    </section>
+  )
+}
+
+// Canonical denomination order for the filter dropdown (derived from the base asset).
+const GIWA_DENOMINATIONS = ["USD", "BTC", "ETH", "XRP"]
+
+// Network filter options (ordered) + their brand logos. "Giwa" is the actual chain; Ethereum/XRPL
+// come from the mapped legacy product. Ethereum reuses the ETH diamond mark already used for ETH.
+const NETWORK_ORDER = ["Ethereum", "XRPL", "Giwa"]
+const NETWORK_LOGOS: Record<string, string> = {
+  Ethereum: "/logos/ethereum.svg",
+  XRPL: "/logos/XRP.png",
+  Giwa: "/logos/giwa.png",
+}
+
+// Multi-select filter bar: Category · Denomination · Issuer · Network. Product search lives in the header.
+// Options are DERIVED from the current rows' unique mapped values (ordered by the canonical lists),
+// so every option actually filters and no row is left unfilterable. Issuer rows carry a logo.
+export function GiwaFilterBar({
+  products,
+  listedFunds = [],
+  filters,
+  onChange,
+}: {
+  products: GiwaCatalogItem[]
+  listedFunds?: readonly ListedFund[]
+  filters: GiwaFilters
+  onChange: (patch: Partial<GiwaFilters>) => void
+}) {
+  const categoryPresent = new Set<string>([...products.map(productCategory), ...listedFunds.map((fund) => fund.category)])
+  const denomPresent = new Set([...products.map(denominationOf), ...(listedFunds.length > 0 ? ["USD"] : [])])
+  const issuerPresent = new Set([
+    ...(products.map((product) => legacyProfile(product).issuer).filter(Boolean) as string[]),
+    ...listedFunds.map((fund) => fund.issuerKey),
+  ])
+  const networkPresent = new Set([...products.flatMap(networksOf), ...listedFunds.flatMap(listedFundNetworks)])
+
+  // Investor-visible categories only (Arco Saving excluded, matching the hidden Strategies card),
+  // and only those present in the visible vaults or listed funds — so no empty/unfilterable option.
+  const categoryOptions = INVESTOR_CATEGORIES.filter((category) => categoryPresent.has(category)).map((category) => ({
+    value: category,
+    label: categoryTitle(category),
+  }))
+  const denominationOptions = GIWA_DENOMINATIONS.filter((denom) => denomPresent.has(denom)).map((denom) => ({ value: denom, label: denom }))
+  const issuerOptions = Object.keys(ISSUERS)
+    .filter((key) => issuerPresent.has(key))
+    .map((key) => ({ value: key, label: ISSUERS[key].label, icon: ISSUERS[key].logo }))
+  const networkOptions = NETWORK_ORDER.filter((network) => networkPresent.has(network)).map((network) => ({ value: network, label: network, icon: NETWORK_LOGOS[network] }))
+
+  return (
+    <div className="flex flex-wrap items-center gap-5">
+      <div className="flex flex-wrap items-center gap-2.5">
+        <GiwaMultiSelect
+          label="Category"
+          options={categoryOptions}
+          selected={filters.category}
+          onChange={(next) => onChange({ category: next as GiwaCategory[] })}
+        />
+        <GiwaMultiSelect
+          label="Denomination"
+          options={denominationOptions}
+          selected={filters.denomination}
+          onChange={(next) => onChange({ denomination: next })}
+        />
+        <GiwaMultiSelect
+          label="Issuer"
+          options={issuerOptions}
+          selected={filters.issuer}
+          onChange={(next) => onChange({ issuer: next })}
+        />
+        <GiwaMultiSelect
+          label="Network"
+          options={networkOptions}
+          selected={filters.network}
+          onChange={(next) => onChange({ network: next })}
+        />
+      </div>
+    </div>
+  )
+}
+
+export function ProductCatalogList({
+  products,
+  selectedProductId,
+  onSelect,
+}: {
+  products: GiwaCatalogItem[]
+  selectedProductId: string
+  onSelect: (productId: string) => void
+}) {
+  return (
+    <GiwaProductsTable
+      rows={products}
+      selectedProductId={selectedProductId}
+      sortDir="desc"
+      onSelect={onSelect}
+    />
+  )
+}
+
+export function GiwaProductsTable({
+  rows,
+  selectedProductId,
+  sortDir,
+  onToggleSort,
+  onSelect,
+}: {
+  rows: GiwaCatalogItem[]
+  selectedProductId: string
+  sortDir: "asc" | "desc"
+  onToggleSort?: () => void
+  onSelect: (productId: string) => void
+}) {
+  const sorted = useMemo(() => {
+    const next = [...rows]
+    next.sort((a, b) => {
+      const left = productCategory(a).localeCompare(productCategory(b)) || a.symbol.localeCompare(b.symbol)
+      return sortDir === "desc" ? left : -left
+    })
+    return next
+  }, [rows, sortDir])
+
+  return (
+    <div
+      className="overflow-x-auto rounded-[var(--radius-card)] bg-[var(--color-arco-surface-30)] p-5"
+      style={{ boxShadow: "var(--shadow-table)" }}
+      data-testid="giwa-catalog"
+    >
+      <div className={`grid min-w-[900px] ${PRODUCT_COLS} items-center px-1.5 pb-2`}>
+        <span className={HEAD}>Product</span>
+        <span className={`${HEAD} text-center`}>Payment</span>
+        <span className={`${HEAD} text-center`}>Decimals</span>
+        <button
+          type="button"
+          onClick={onToggleSort}
+          className={`${HEAD} flex items-center justify-end gap-1 text-right hover:text-[var(--color-arco-ink)]`}
+        >
+          Registry
+          <SortChevrons active={sortDir} />
+        </button>
+        <span className={`${HEAD} text-center`}>Vault route</span>
+        <span className={`${HEAD} text-center`}>Network</span>
+      </div>
+
+      {sorted.length === 0 ? (
+        <div className="flex min-w-[900px] flex-col items-center gap-3 rounded-[var(--radius-row)] bg-[var(--color-arco-surface)] px-6 py-14 text-center">
+          <p className="text-sm text-[var(--color-arco-muted)]">No products match your filters.</p>
+        </div>
+      ) : (
+        <div className="flex min-w-[900px] flex-col gap-2.5">
+          {sorted.map((product) => (
+            <GiwaProductRow
+              key={product.productId}
+              product={product}
+              selected={product.productId === selectedProductId}
+              onSelect={() => onSelect(product.productId)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function GiwaProductRow({
+  product,
+  selected,
+  onSelect,
+}: {
+  product: GiwaCatalogItem
+  selected: boolean
+  onSelect: () => void
+}) {
+  const rowBg = productCategory(product) === "Arco Saving" ? "bg-[var(--color-row-saving)]" : "bg-[var(--color-arco-surface)]"
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onSelect}
+      onKeyDown={(event) => (event.key === "Enter" || event.key === " ") && onSelect()}
+      className={`group relative grid h-[59px] cursor-pointer ${PRODUCT_COLS} items-center rounded-[var(--radius-row)] px-1.5 outline-none transition-[box-shadow] focus-visible:ring-2 focus-visible:ring-[var(--color-arco-ink-40)] ${
+        selected ? "ring-2 ring-[var(--color-arco-ink-40)]" : ""
+      } ${rowBg}`}
+    >
+      <span className="pointer-events-none absolute inset-0 rounded-[var(--radius-row)] bg-transparent backdrop-blur-0 transition-all duration-150 group-hover:bg-[var(--color-row-hover-weak)] group-hover:backdrop-blur-[1px]" />
+      <div className="relative z-10 flex items-center gap-2.5 pl-1">
+        <GiwaBrandMark src={tokenIcon(product.productId)} label={product.symbol} size={35} />
+        <div className="flex flex-col">
+          <span className="text-base font-medium leading-5 text-[var(--color-arco-ink)]">{product.symbol}</span>
+          <span className="mt-1 w-fit rounded-full bg-[var(--color-arco-chip)] px-1.5 py-0.5 text-[11px] leading-none text-[var(--color-arco-ink)] ring-[0.5px] ring-[var(--color-arco-border)]">
+            {productType(product)}
+          </span>
+        </div>
+      </div>
+      <div className="relative z-10 flex justify-center">
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-[var(--color-arco-chip)] px-2 py-1 text-xs text-[var(--color-arco-text-soft)]">
+          <GiwaBrandMark src={paymentAssetIcon(product.paymentAssetSymbol)} label={product.paymentAssetSymbol} size={18} />
+          {product.paymentAssetSymbol}
+        </span>
+      </div>
+      <div className="relative z-10 text-center tabular-nums text-sm text-[var(--color-arco-ink)]">{product.paymentAsset?.decimals ?? "--"}</div>
+      <div className="relative z-10 text-right text-xs text-[var(--color-arco-text-soft)]">
+        <span className="block font-medium text-[var(--color-arco-ink)]">
+          {hasDeploymentAddresses(product) ? "Loaded" : "Awaiting"}
+        </span>
+        <span>{requiredPaymentInvariant(product)}</span>
+      </div>
+      <div className="relative z-10 text-center font-mono text-[11px] text-[var(--color-arco-text-soft)]">
+        <span title={product.depositVaultAddress ?? ""}>{shortAddr(product.depositVaultAddress)}</span>
+        <span className="mx-1 text-[var(--color-arco-muted)]">/</span>
+        <span title={product.redemptionVaultAddress ?? ""}>{shortAddr(product.redemptionVaultAddress)}</span>
+      </div>
+      <div className="relative z-10 flex justify-center">
+        <GiwaNetworkIcon size={20} />
+      </div>
+    </div>
+  )
+}
+
+// ── Investor catalog table (legacy-style columns) ──────────────────────────────
+// Public products list at the root route. Mirrors the legacy ProductsTable column
+// set (Product | Base Asset | Asset Manager | Issuer | AUM | APY | Network) over REAL
+// GIWA registry rows. Kept SEPARATE from GiwaProductsTable so Admin's ProductCatalogList
+// (operational columns: decimals / registry load-state / vault route) stays unchanged.
+const CATALOG_HEAD = "px-1.5 py-2.5 text-base font-medium text-[var(--color-arco-chip-ink)]"
+const CATALOG_COLS =
+  "grid-cols-[minmax(240px,1.5fr)_0.85fr_1.15fr_0.9fr_1fr_0.9fr_0.55fr]"
+
+// Base/settlement asset symbol without the testnet "t" prefix: tUSDC→USDC, tBTC→BTC,
+// tWETH→ETH, tXRP→XRP.
+function baseAssetSymbol(paymentSymbol: string): string {
+  const base = paymentSymbol.replace(/^t/, "")
+  return base === "WETH" ? "ETH" : base
+}
+
+// Denomination derived from the base/settlement asset for the filter bar: USDC settles USD;
+// BTC/ETH/XRP keep their symbol. Mirrors the legacy Denomination filter, plus XRP for aXRP.
+function denominationOf(product: GiwaCatalogItem): string {
+  const base = baseAssetSymbol(product.paymentAssetSymbol)
+  return base === "USDC" ? "USD" : base
+}
+
+// Networks for the Network filter. Every GIWA row is on GIWA Sepolia, so "Giwa" is always present
+// (selecting it matches all rows, consistent with the Network column's GIWA logo); the mapped legacy
+// product's Ethereum/XRPL are added for parity. aXRP has no legacy entry → ["Ethereum"] like its
+// Arco Saving siblings.
+function networksOf(product: GiwaCatalogItem): string[] {
+  const legacy = productById(product.productId.toLowerCase())?.networks ?? ["Ethereum"]
+  return ["Giwa", ...legacy]
+}
+
+// Legacy product profile for a GIWA row: Asset Manager / Issuer / AUM / APY come from
+// products.ts. aXRP has no legacy entry — as an Arco Saving product it inherits Arco/Arco
+// brand marks (like aBTC/aETH); AUM/APY stay null and render as "—".
+function legacyProfile(product: GiwaCatalogItem): {
+  assetManager: string | null
+  issuer: string | null
+  aum: number | null
+  apy: number | null
+} {
+  const legacy = productById(product.productId.toLowerCase())
+  if (legacy) {
+    return { assetManager: legacy.assetManager, issuer: legacy.issuer, aum: legacy.aum, apy: legacy.apy }
+  }
+  const arcoSaving = productCategory(product) === "Arco Saving"
+  return { assetManager: arcoSaving ? "arco" : null, issuer: arcoSaving ? "arco" : null, aum: null, apy: null }
+}
+
+type CatalogEntry =
+  | { kind: "deployed"; key: string; pinned: boolean; symbol: string; aum: number | null; rate: number | null; product: GiwaCatalogItem }
+  | { kind: "listed"; key: string; pinned: boolean; symbol: string; aum: number | null; rate: number | null; fund: ListedFund }
+
+export function GiwaCatalogTable({
+  rows,
+  listedRows = [],
+  selectedProductId,
+  sortKey,
+  sortDir,
+  onSort,
+  onSelect,
+  apyByProductId,
+  impliedApyByProductId,
+}: {
+  rows: GiwaCatalogItem[]
+  listedRows?: readonly ListedFund[]
+  selectedProductId: string
+  sortKey: "aum" | "apy"
+  sortDir: "asc" | "desc"
+  onSort?: (key: "aum" | "apy") => void
+  onSelect: (productId: string) => void
+  apyByProductId?: Record<string, number | null>
+  impliedApyByProductId?: Record<string, number | null>
+}) {
+  const entries = useMemo(() => {
+    // Deployed vaults and listed funds sort together. Config-first numeric AUM (matches the
+    // displayed value) and the resolved headline rate; null/"—" always sorts last
+    // (compareNullLast), in both directions.
+    const aumKey = (p: GiwaCatalogItem) => parseAumToNumber(vaultConfigOf(p).aum) ?? legacyProfile(p).aum ?? null
+    const rateKey = (p: GiwaCatalogItem) => {
+      const id = p.productId.toLowerCase()
+      return apyByProductId?.[id] ?? DEPLOYED_FUND_METRICS[id]?.rate ?? legacyProfile(p).apy ?? impliedApyByProductId?.[id] ?? null
+    }
+    const all: CatalogEntry[] = [
+      ...rows.map((product): CatalogEntry => ({
+        kind: "deployed",
+        key: product.productId,
+        pinned: vaultConfigOf(product).pinned,
+        symbol: product.symbol,
+        aum: aumKey(product),
+        rate: rateKey(product),
+        product,
+      })),
+      ...listedRows.map((fund): CatalogEntry => ({
+        kind: "listed",
+        key: fund.id,
+        pinned: false,
+        symbol: fund.symbol,
+        aum: fund.aum.usd,
+        rate: fund.rate,
+        fund,
+      })),
+    ]
+    return all.sort((a, b) => {
+      // Operator-pinned vaults stay on top regardless of the sort.
+      const pinned = Number(b.pinned) - Number(a.pinned)
+      if (pinned !== 0) return pinned
+      const byKey = sortKey === "aum" ? compareNullLast(a.aum, b.aum, sortDir) : compareNullLast(a.rate, b.rate, sortDir)
+      return byKey || a.symbol.localeCompare(b.symbol)
+    })
+  }, [rows, listedRows, sortKey, sortDir, apyByProductId, impliedApyByProductId])
+
+  return (
+    <div
+      className="w-full overflow-x-auto rounded-2xl bg-[var(--color-arco-surface)] p-4 sm:p-6"
+      data-testid="giwa-catalog"
+    >
+      <div className={`grid min-w-[1000px] ${CATALOG_COLS} items-center border-y border-[var(--color-arco-border)] px-1.5 py-1`}>
+        <span className={CATALOG_HEAD}>Product</span>
+        <span className={`${CATALOG_HEAD} text-center`}>Base Asset</span>
+        <span className={`${CATALOG_HEAD} text-center`}>Asset Manager</span>
+        <span className={`${CATALOG_HEAD} text-center`}>Issuer</span>
+        <button
+          type="button"
+          onClick={() => onSort?.("aum")}
+          className={`${CATALOG_HEAD} flex items-center justify-center gap-1 text-center hover:text-[var(--color-arco-ink)]`}
+        >
+          AUM
+          <SortChevrons active={sortKey === "aum" ? sortDir : undefined} />
+        </button>
+        <button
+          type="button"
+          onClick={() => onSort?.("apy")}
+          className={`${CATALOG_HEAD} flex items-center justify-center gap-1 text-center hover:text-[var(--color-arco-ink)]`}
+        >
+          APY
+          <SortChevrons active={sortKey === "apy" ? sortDir : undefined} />
+        </button>
+        <span className={`${CATALOG_HEAD} text-center`}>Network</span>
+      </div>
+
+      {entries.length === 0 ? (
+        <div className="flex min-w-[1000px] flex-col items-center gap-3 border-b border-[var(--color-arco-border)] px-6 py-14 text-center">
+          <p className="text-sm text-[var(--color-arco-muted)]">No products match your filters.</p>
+        </div>
+      ) : (
+        <div className="flex min-w-[1000px] flex-col">
+          {entries.map((entry) =>
+            entry.kind === "deployed" ? (
+              <GiwaCatalogRow
+                key={entry.key}
+                product={entry.product}
+                apy={apyByProductId?.[entry.product.productId.toLowerCase()] ?? null}
+                impliedApy={impliedApyByProductId?.[entry.product.productId.toLowerCase()] ?? null}
+                selected={entry.product.productId === selectedProductId}
+                onSelect={() => onSelect(entry.product.productId)}
+              />
+            ) : (
+              <ListedFundRow
+                key={entry.key}
+                fund={entry.fund}
+                gridColumnsClassName={CATALOG_COLS}
+                onSelect={() => onSelect(entry.fund.id)}
+              />
+            ),
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// These captured manager icons have matching local assets. Resolve only the
+// known source URLs so an admin-supplied replacement still takes precedence.
+const LOCAL_MANAGER_LOGOS: Readonly<Record<string, string>> = {
+  "https://pbs.twimg.com/profile_images/1800482990062989312/a59zSH1W_400x400.jpg": "/logos/bny-investments.jpg",
+  "https://pbs.twimg.com/profile_images/1145608301033533440/6vNXqPlJ_400x400.jpg": "/logos/umint.svg",
+  "https://img.rwa.xyz/content/entity-icons/128/color/franklin_templeton.png": "/logos/franklin.png",
+  "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTJErgRf7Zuo6Xesl4Y06aSYkJBZed-lfwF6XVyJaCEgtB8f9Y3fWRpp98&s=10": "/logos/aksia.svg",
+}
+
+function GiwaCatalogRow({
+  product,
+  apy,
+  impliedApy,
+  selected,
+  onSelect,
+}: {
+  product: GiwaCatalogItem
+  apy: number | null
+  impliedApy: number | null
+  selected: boolean
+  onSelect: () => void
+}) {
+  const profile = legacyProfile(product)
+  const am = profile.assetManager ? ASSET_MANAGERS[profile.assetManager] : undefined
+  const iss = profile.issuer ? ISSUERS[profile.issuer] : undefined
+  const config = vaultConfigOf(product)
+  // Config-first identity (mirrors the detail page): config value → legacy → letter/— fallback.
+  // Built-ins have null config, so they resolve to the same legacy values as before.
+  const vaultImage = vaultImageFor(product)
+  const subtitle = config.category ? categoryTitle(config.category) : productType(product)
+  const risk = vaultCategoryRisk(productCategory(product))
+  const managerLabel = config.assetManagerName ?? am?.label ?? null
+  const managerLogo = LOCAL_MANAGER_LOGOS[config.assetManagerImageUrl ?? ""] ?? config.assetManagerImageUrl ?? am?.logo
+  const issuerLabel = config.issuerName ?? iss?.label ?? null
+  const issuerLogo = config.issuerImageUrl ?? iss?.logo
+  const baseSymbol = baseAssetSymbol(product.paymentAssetSymbol)
+  // Published rate wins, then the fund deck's latest figure (labelled and dated), then the legacy
+  // profile; implied APY only fills the gap for vaults with none of these (e.g. newly-registered ones).
+  const deck = DEPLOYED_FUND_METRICS[product.productId.toLowerCase()]
+  const rate: { value: string; caption: string | null } =
+    apy != null
+      ? { value: apyLabel(apy), caption: null }
+      : deck
+        ? { value: deck.metric.value, caption: metricCaption(deck.metric) }
+        : profile.apy != null
+          ? { value: apyLabel(profile.apy), caption: null }
+          : impliedApy != null
+            ? { value: apyLabel(impliedApy), caption: null }
+            : { value: "—", caption: null }
+  // Config-first (matches the detail AUM stat): admin free-text AUM → legacy numeric → —.
+  const aumText = config.aum ?? (profile.aum != null ? aumLabel(profile.aum) : "—")
+
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onSelect}
+      onKeyDown={(event) => (event.key === "Enter" || event.key === " ") && onSelect()}
+      className={`group relative grid min-h-[72px] cursor-pointer ${CATALOG_COLS} items-center border-b border-[var(--color-arco-border)] px-1.5 py-3 outline-none transition-colors hover:bg-[var(--color-arco-surface-muted)] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-arco-ink-40)] ${
+        selected ? "bg-[var(--color-arco-chip)]" : "bg-[var(--color-arco-surface)]"
+      }`}
+    >
+      <div className="relative z-10 flex items-center gap-2.5 pl-1">
+        <GiwaBrandMark src={vaultImage} label={product.symbol} size={35} />
+        <div className="flex flex-col">
+          <span className="text-base font-medium leading-5 text-[var(--color-arco-ink)]">
+            {vaultDisplayName(product)}
+          </span>
+          <span className="mt-1 flex flex-wrap items-center gap-1">
+            {risk && <RiskTag level={risk} />}
+            <span className="whitespace-nowrap rounded-full bg-[var(--color-arco-chip)] px-1.5 py-0.5 text-[11px] leading-none text-[var(--color-arco-ink)] ring-[0.5px] ring-[var(--color-arco-border)]">
+              {subtitle}
+            </span>
+          </span>
+        </div>
+      </div>
+
+      <div className="relative z-10 flex justify-center">
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-[var(--color-arco-chip)] px-2 py-1 text-xs text-[var(--color-arco-text-soft)]">
+          <GiwaBrandMark src={paymentAssetIcon(product.paymentAssetSymbol)} label={baseSymbol} size={18} />
+          {baseSymbol}
+        </span>
+      </div>
+
+      <div className="relative z-10 flex min-w-0 items-center justify-center gap-1.5 px-1">
+        {managerLabel ? (
+          <>
+            <BrandMark src={managerLogo} label={managerLabel} size={20} />
+            <span className="truncate text-xs text-[var(--color-arco-text-soft)]">{managerLabel}</span>
+          </>
+        ) : (
+          <span className="text-xs text-[var(--color-arco-muted)]">—</span>
+        )}
+      </div>
+
+      <div className="relative z-10 flex min-w-0 items-center justify-center gap-1.5 px-1">
+        {issuerLabel ? (
+          <>
+            <BrandMark src={issuerLogo} label={issuerLabel} size={20} />
+            <span className="truncate text-xs text-[var(--color-arco-text-soft)]">{issuerLabel}</span>
+          </>
+        ) : (
+          <span className="text-xs text-[var(--color-arco-muted)]">—</span>
+        )}
+      </div>
+
+      <div className="relative z-10 text-center tabular-nums text-sm text-[var(--color-arco-ink)]">{aumText}</div>
+      <RateCell value={rate.value} caption={rate.caption} />
+      <div className="relative z-10 flex justify-center">
+        <GiwaNetworkIcon size={20} />
+      </div>
+    </div>
+  )
+}
+
+// Expandable Transaction Fees content (Instant Fees). Config-first per fee, formatted with the
+// shared percent rule; a fee the vault has not set shows "—". A Router buy adds the stablecoin swap
+// fee of the coin it pays with (`swapFee`), with a "?" that says which coins pay it and who charges it.
+function GiwaFeeBreakdown({
+  mintingBps,
+  redemptionBps,
+  swapFee = null,
+}: {
+  mintingBps: number | null
+  redemptionBps: number | null
+  swapFee?: { bps: number; help: string } | null
+}) {
+  const [swapHelpOpen, setSwapHelpOpen] = useState(false)
+  const rows = [
+    { label: "Instant Minting", value: mintingBps != null ? formatPercentFromBps(mintingBps) : "—" },
+    { label: "Instant Redemption", value: redemptionBps != null ? formatPercentFromBps(redemptionBps) : "—" },
+  ]
+  return (
+    <div>
+      <div className="flex items-center gap-1 text-xs text-[var(--color-arco-muted)]">
+        Instant Fees
+        <Info className="size-3" />
+      </div>
+      <div className="mt-1">
+        {rows.map((fee) => (
+          <div
+            key={fee.label}
+            className="flex items-center justify-between border-t border-[var(--color-arco-border)] py-2 pl-3 text-sm"
+          >
+            <span className="text-[var(--color-arco-text-soft)]">{fee.label}</span>
+            <span className="tabular-nums text-[var(--color-arco-ink)]">{fee.value}</span>
+          </div>
+        ))}
+        {swapFee && (
+          // The "?" is the panel's help badge (InfoRow `help`): hover shows the text, a press opens it below the row.
+          <div className="border-t border-[var(--color-arco-border)] py-2 pl-3 text-sm">
+            <div className="flex items-center justify-between gap-3">
+              <span className="flex items-center gap-1.5 text-[var(--color-arco-text-soft)]">
+                Stablecoin swap fee
+                <button
+                  type="button"
+                  title={swapFee.help}
+                  aria-label="About Stablecoin swap fee"
+                  aria-expanded={swapHelpOpen}
+                  onClick={() => setSwapHelpOpen((current) => !current)}
+                  className="inline-flex size-5 items-center justify-center rounded-md bg-[var(--color-arco-chip)] text-xs font-medium text-[var(--color-arco-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--color-arco-ink)]"
+                >
+                  ?
+                </button>
+              </span>
+              <span className="tabular-nums text-[var(--color-arco-ink)]">{formatPercentFromBps(swapFee.bps)}</span>
+            </div>
+            {swapHelpOpen ? <p className="mt-1.5 text-xs leading-5 text-[var(--color-arco-text-soft)]">{swapFee.help}</p> : null}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// Vault shares are 18-dec (same constant the activity feed uses to humanise share amounts).
+const PRODUCT_TOKEN_DECIMALS = 18
+
+// Parse a human decimal string into base units at `decimals`. null when it isn't a plain
+// non-negative number — the "--" balance placeholder, a blank field, or a half-typed "1.".
+function toBaseUnits(value: string, decimals: number): bigint | null {
+  const trimmed = value.trim()
+  if (!/^\d+(\.\d+)?$/.test(trimmed)) return null
+  try {
+    return parseUnits(trimmed, decimals)
+  } catch {
+    return null
+  }
+}
+
+// The amount being PAID exceeds the wallet balance the panel already shows. Compared in base
+// units at the paying token's decimals, so a MAX-filled amount is exactly equal (never "over")
+// and digits beyond the token's precision can't manufacture a false positive.
+function exceedsBalance(amount: string, balance: string, decimals: number): boolean {
+  const wanted = toBaseUnits(amount, decimals)
+  const held = toBaseUnits(balance, decimals)
+  if (wanted == null || held == null) return false
+  return wanted > 0n && wanted > held
+}
+
+// Phases where the shown balance isn't actionable (unknown or the button has its own
+// prerequisite label), so "Insufficient Balance" must not pre-empt them.
+const BALANCE_BLIND_PHASES = ["disconnected", "wrong-network", "missing-gas", "missing-payment-token", "loading-registry"]
+
+function primaryActionLabel(
+  phase: UiPhase,
+  allowanceRequired: boolean,
+  operationLabel: string,
+  insufficientBalance = false,
+) {
+  if (phase === "disconnected") return "Connect Wallet"
+  if (phase === "wrong-network") return "Switch GIWA"
+  if (phase === "missing-gas") return "Get GIWA ETH"
+  if (phase === "missing-payment-token") return "Payment token missing"
+  // A fund's buy route (ArcoUSD Router or direct) is not known yet.
+  if (phase === "loading-registry") return "Loading…"
+  // Can't act without the balance. Outranks the operation label AND the redeem
+  // request-redemption fallback (both arrive via operationLabel), and also Approve — the button
+  // is disabled here, so its label has to say why rather than offer a pointless approval.
+  if (insufficientBalance) return "Insufficient Balance"
+  if (allowanceRequired) return "Approve"
+  return operationLabel
+}
+
+export function GiwaInvestPanel({
+  product,
+  price,
+  operation,
+  amount,
+  paymentBalance,
+  productBalance,
+  allowanceRequired,
+  phase,
+  pausedNotice,
+  error,
+  txHashes,
+  successLabel,
+  pendingRedemptions,
+  instantLiquidityUsd,
+  baseUsd,
+  savings,
+  variant = "sidebar",
+  routed = false,
+  payAssets = [],
+  payAsset = null,
+  payBalance,
+  payChoices = [],
+  onPayAssetChange,
+  onOperationChange,
+  onAmountChange,
+  onApprove,
+  onSubmit,
+  onRequestRedeem,
+  onStart,
+  onConnect,
+  onSwitchNetwork,
+}: {
+  product: GiwaCatalogItem
+  price?: number | null
+  operation: "deposit" | "requestDeposit" | "redeemInstant" | "requestRedeem" | "claimRedeem"
+  amount: string
+  requestId: string
+  paymentBalance: string
+  productBalance: string
+  allowance: string
+  allowanceRequired: boolean
+  greenlistEnforced: boolean
+  activeVault: string | null
+  phase: UiPhase
+  // Per-vault function pause (catalog pauseState): when set, the primary action is
+  // disabled and this reason renders with the panel's standard notice styling.
+  pausedNotice?: string | null
+  error: string | null
+  txHashes: string[]
+  successLabel?: string | null
+  pendingRedemptions: GiwaRedemption[]
+  // Live redemption-vault liquidity in USD (display profile); null => "—".
+  instantLiquidityUsd?: number | null
+  // USD rate for the payment asset (market.baseUsd); lets us compare the redeem payout
+  // (payment-asset units) against instantLiquidityUsd (USD) in the SAME unit. null => "—".
+  baseUsd?: number | null
+  // Savings-only footer (SavingsDetail). When present, the footer shows APY / Est. Annual Yield /
+  // Redemption Timeline instead of Instant liquidity / Transaction Fees. Absent on the product
+  // detail (and everywhere else) => footer renders byte-identical.
+  savings?: { apyText: string; apyPercent: number | null; acceptAssetIcon: string | null }
+  // Container adaptation only (no logic/tab change): "sidebar" (default) keeps the desktop
+  // aside styling byte-identical (sticky). "sheet" and "flow" drop the sticky offset so the
+  // panel flows with the page — "sheet" inside the mobile bottom sheet, "flow" in a
+  // single-column layout (e.g. Savings) where a sticky panel would block scroll to the footer.
+  variant?: "sidebar" | "sheet" | "flow"
+  // ArcoRouter fund buys (useGiwaProductOperation): the invest side pays with the selected Reserve
+  // stablecoin or ArcoUSD instead of the fund's payment asset. Absent / not routed => the panel
+  // renders exactly as before.
+  routed?: boolean
+  payAssets?: readonly PayAssetOption[]
+  payAsset?: PayAssetOption | null
+  payBalance?: string
+  // The token picker's rows ("Select a token"): every coin on every chain, the Router's pay assets on GIWA available.
+  payChoices?: readonly SavingsAssetChoice[]
+  onPayAssetChange?: (key: string) => void
+  onOperationChange: (operation: "deposit" | "requestDeposit" | "redeemInstant" | "requestRedeem" | "claimRedeem") => void
+  onAmountChange: (amount: string) => void
+  onRequestIdChange: (requestId: string) => void
+  onApprove: () => void
+  onSubmit: () => void
+  // Redeem fallback: submit a redemption REQUEST (requestRedeem) when instant liquidity
+  // can't cover the payout — the panel auto-routes here instead of hitting the revert.
+  onRequestRedeem: () => void
+  // The transaction modal (useGiwaProductOperation): one press opens it with what the panel shows, and it runs the
+  // approval when needed and then the operation. The button then names the operation even when an approval is still
+  // needed (the approval is the modal's first step). Without it the panel keeps its separate Approve press.
+  onStart?: (review: OperationReview) => void
+  onClaim: (requestId: string) => void
+  onConnect: () => void
+  onSwitchNetwork: () => void
+}) {
+  const tab = operation === "deposit" || operation === "requestDeposit" ? "invest" : operation === "claimRedeem" ? "pending" : "redeem"
+  const cfg = vaultConfigOf(product)
+  const busy = ["approving", "simulating", "submitting", "confirming"].includes(phase)
+  // Router fund buy with a chosen pay asset (invest side only; redeem always pays the fund's asset).
+  const routedPay = routed && tab === "invest" && payAsset ? payAsset : null
+  // The pay asset is picked in the Savings token picker, opened from the "You pay" token chip.
+  const [payPickerOpen, setPayPickerOpen] = useState(false)
+  const payPicker = routedPay !== null && payAssets.length > 1 && onPayAssetChange !== undefined && payChoices.length > 0
+  // A picker that goes away (the Redeem tab, a route change) does not come back open by itself.
+  useEffect(() => {
+    if (!payPicker) setPayPickerOpen(false)
+  }, [payPicker])
+  const paySymbol = tab === "redeem" ? product.symbol : routedPay ? routedPay.label : assetLabel(product.paymentAssetSymbol)
+  const receiveSymbol = tab === "redeem" ? assetLabel(product.paymentAssetSymbol) : product.symbol
+  const side: "invest" | "redeem" = tab === "redeem" ? "redeem" : "invest"
+  // A non-base stablecoin loses its swap fee before it buys shares.
+  const quotedPay = routedPay ? amountAfterSwapFee(Number(amount), routedPay.swapFeeBps) : Number(amount)
+  const quote = typeof price === "number" ? computeQuote({ payAmount: quotedPay, price, side }) : null
+  // "~$" assumes a USD-pegged payment asset (tUSDC, or any Router pay asset: USDC, USDT, RLUSD,
+  // ArcoUSD). For tBTC/tWETH/tXRP we show the value in the payment-asset symbol instead — a real
+  // USD figure would need an FX oracle (out of scope).
+  const isUsd = routedPay !== null || product.paymentAssetSymbol === "tUSDC"
+  // A pay asset's mark is the token picker's (USDT, RLUSD and ArcoUSD have their own there).
+  const payIconSrc = (option: PayAssetOption) => payAssetLogo(option) ?? paymentAssetIcon(option.symbol)
+  const payIconFor = (option: PayAssetOption) => <GiwaBrandMark src={payIconSrc(option)} label={option.label} size={18} />
+  const topBalance = tab === "redeem" ? productBalance : routedPay ? (payBalance ?? "--") : paymentBalance
+  const receiveBalance = tab === "redeem" ? paymentBalance : productBalance
+  const canMax = topBalance !== "--" && Number.isFinite(Number(topBalance)) && Number(topBalance) > 0
+  const tradeValue = side === "invest" ? Number(amount) : (quote ?? Number.NaN)
+  const subValueText = Number.isFinite(tradeValue) && tradeValue > 0
+    ? (isUsd ? `~$${tradeValue.toFixed(2)}` : `~${quoteText(tradeValue)} ${product.paymentAssetSymbol}`)
+    : (isUsd ? "~$0.00" : `~0 ${product.paymentAssetSymbol}`)
+
+  // Savings footer only: annualized yield = amount × APY, using the top-field amount (payment
+  // asset on invest, product shares on redeem — the accept-asset logo is shown either way). "—"
+  // when the amount is empty/invalid or the APY is unknown.
+  const savingsYield =
+    savings && savings.apyPercent != null && Number.isFinite(Number(amount)) && Number(amount) > 0
+      ? Number(amount) * (savings.apyPercent / 100)
+      : null
+
+  // Redeem fallback decision: compare the requested payout to instant liquidity in the SAME
+  // unit. `quote` (redeem side) is the payout in payment-asset units; instantLiquidityUsd is
+  // USD, so scale the payout by baseUsd. When it exceeds available liquidity the primary
+  // action becomes a redemption REQUEST (requestRedeem) instead of reverting with
+  // "ARV: liquidity". Unknown liquidity/price/rate (null) keeps the instant path — no false
+  // fallback, and the whole amount goes out as ONE request (no instant/request split).
+  const payoutUsd = tab === "redeem" && quote != null && baseUsd != null ? quote * baseUsd : null
+  const liquidityShort = payoutUsd != null && instantLiquidityUsd != null && payoutUsd > instantLiquidityUsd
+  // Instant liquidity restated in payment-asset units for the notice (baseUsd cancels the USD
+  // scaling above); falls back to the USD figure only if baseUsd is unavailable.
+  const liquidityInPaymentAsset =
+    instantLiquidityUsd != null && baseUsd != null && baseUsd > 0 ? instantLiquidityUsd / baseUsd : instantLiquidityUsd
+  const redeemPrimaryLabel = liquidityShort ? "Request redemption" : "Redeem instant"
+  // The paying token is the payment asset on invest, the product token (shares) on redeem —
+  // exactly the balance shown above the field and behind MAX.
+  const payDecimals = side === "redeem" ? PRODUCT_TOKEN_DECIMALS : routedPay ? routedPay.decimals : (product.paymentAsset?.decimals ?? 18)
+  const insufficientBalance =
+    tab !== "pending" && !BALANCE_BLIND_PHASES.includes(phase) && exceedsBalance(amount, topBalance, payDecimals)
+  const actionLabel = primaryActionLabel(
+    phase,
+    allowanceRequired && !onStart,
+    operation === "deposit"
+      ? "Invest"
+      : operation === "requestDeposit"
+        ? "Request deposit"
+        : operation === "redeemInstant"
+          ? redeemPrimaryLabel
+          : operation === "requestRedeem"
+            ? "Request redemption"
+            : "Claim redemption",
+    insufficientBalance,
+  )
+
+  function runPrimary() {
+    if (phase === "disconnected") return onConnect()
+    if (phase === "wrong-network") return onSwitchNetwork()
+    if (phase === "missing-gas") {
+      window.open(GIWA_FAUCET_URL, "_blank", "noreferrer")
+      return
+    }
+    // Defensive: the button is already disabled, but never let an over-balance amount reach the
+    // vault (it would revert with "ERC20: transfer amount exceeds balance").
+    if (insufficientBalance) return
+    if (onStart && operation !== "claimRedeem") return onStart(review(liquidityShort ? "requestRedeem" : operation))
+    if (allowanceRequired) return onApprove()
+    if (liquidityShort) return onRequestRedeem()
+    return onSubmit()
+  }
+
+  // What the modal shows while it runs: the amounts, symbols and marks exactly as the panel shows them at the press.
+  function review(next: FlowOperation): OperationReview {
+    const payIcon = tab === "redeem" ? vaultImageFor(product) : routedPay ? payIconSrc(routedPay) : paymentAssetIcon(product.paymentAssetSymbol)
+    const receiveIcon = tab === "redeem" ? paymentAssetIcon(product.paymentAssetSymbol) : vaultImageFor(product)
+    return {
+      kind: savings ? "savings" : "funds",
+      operation: next,
+      productName: vaultDisplayName(product),
+      pay: { amount: displayAmount(amount), symbol: paySymbol, icon: payIcon ?? null, sub: subValueText },
+      receive: {
+        amount: Number(amount) > 0 && quote !== null ? displayAmount(quoteText(quote)) : null,
+        symbol: receiveSymbol,
+        icon: receiveIcon ?? null,
+        sub: subValueText,
+      },
+      apyText: savings?.apyText ?? null,
+    }
+  }
+
+  return (
+    <div className={`${variant === "sidebar" ? "sticky top-[104px]" : ""} ${INVEST_PANEL_CARD}`}>
+      <div className="flex items-center justify-between">
+        <button
+          type="button"
+          className="inline-flex items-center gap-1.5 rounded-[var(--radius-pill)] bg-[var(--color-arco-chip)] px-2.5 py-1 text-xs text-[var(--color-arco-text-soft)]"
+        >
+          <GiwaNetworkIcon size={14} />
+          GIWA Sepolia
+          <ChevronDown className="size-3 text-[var(--color-arco-muted)]" />
+        </button>
+      </div>
+
+      <div className={`mt-3 grid grid-cols-3 ${INVEST_TAB_TRACK}`}>
+        {(["invest", "redeem", "pending"] as const).map((item) => (
+          <button
+            key={item}
+            type="button"
+            onClick={() => onOperationChange(item === "invest" ? "deposit" : item === "redeem" ? "redeemInstant" : "claimRedeem")}
+            className={`${INVEST_TAB} capitalize ${tab === item ? INVEST_TAB_ACTIVE : INVEST_TAB_INACTIVE}`}
+          >
+            {item}
+          </button>
+        ))}
+      </div>
+
+      <div className="mt-4">
+        {tab === "pending" ? (
+          <PendingRedemptionList rows={pendingRedemptions} product={product} price={price} />
+        ) : (
+          <>
+            <AmountBlock>
+              <AmountField
+                caption={tab === "redeem" ? "Amount to redeem" : "You pay"}
+                symbol={paySymbol}
+                icon={
+                  tab === "redeem"
+                    ? <GiwaBrandMark src={vaultImageFor(product)} label={product.symbol} size={18} />
+                    : routedPay
+                      ? payIconFor(routedPay)
+                      : <GiwaBrandMark src={paymentAssetIcon(product.paymentAssetSymbol)} label={assetLabel(product.paymentAssetSymbol)} size={18} />
+                }
+                symbolControl={
+                  payPicker ? (
+                    <button
+                      type="button"
+                      aria-haspopup="dialog"
+                      aria-label={`Pay with: ${routedPay.label}`}
+                      disabled={busy}
+                      onClick={() => setPayPickerOpen(true)}
+                      className="inline-flex shrink-0 items-center gap-1.5 rounded-[var(--radius-pill)] bg-[var(--color-arco-chip)] py-1 pl-1 pr-2 text-sm font-medium text-[var(--color-arco-ink)] disabled:opacity-60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-arco-ink)]"
+                    >
+                      {payIconFor(routedPay)}
+                      {routedPay.label}
+                      <ChevronDown aria-hidden="true" className="size-3.5 text-[var(--color-arco-muted)]" />
+                    </button>
+                  ) : undefined
+                }
+                value={amount}
+                onChange={onAmountChange}
+                balance={topBalance}
+                onMax={canMax ? () => onAmountChange(topBalance) : undefined}
+                subValue={subValueText}
+              />
+              <AmountField
+                caption="You receive"
+                symbol={receiveSymbol}
+                icon={
+                  tab === "redeem"
+                    ? <GiwaBrandMark src={paymentAssetIcon(product.paymentAssetSymbol)} label={assetLabel(product.paymentAssetSymbol)} size={18} />
+                    : <GiwaBrandMark src={vaultImageFor(product)} label={product.symbol} size={18} />
+                }
+                value={Number(amount) > 0 ? (quote !== null ? quoteText(quote) : "Onchain quote") : "0"}
+                readOnly
+                balance={receiveBalance}
+                subValue={subValueText}
+              />
+            </AmountBlock>
+            <div className="mt-3">
+              {savings ? (
+                <>
+                  {/* Savings footer (SavingsDetail): APY / Est. Annual Yield / Redemption Timeline.
+                      Instant liquidity + Transaction Fees are hidden here. */}
+                  <InfoRow label="APY" value={savings.apyText} />
+                  <InfoRow
+                    label="Est. Annual Yield"
+                    value={
+                      <span className="inline-flex items-center gap-1.5">
+                        {savingsYield != null ? compactNumber(savingsYield) : "—"}
+                        {savings.acceptAssetIcon && (
+                          <GiwaBrandMark src={savings.acceptAssetIcon} label="" size={16} />
+                        )}
+                      </span>
+                    }
+                  />
+                  <InfoRow
+                    label="Redemption Timeline"
+                    value={cfg.redemptionTimelineDays != null ? `${cfg.redemptionTimelineDays} Days` : "30-90 Business Days"}
+                  />
+                </>
+              ) : (
+                <>
+                  {tab === "invest" && (
+                    <InfoRow
+                      label="Instant liquidity"
+                      value={instantLiquidityUsd != null ? aumLabel(instantLiquidityUsd) : "—"}
+                    />
+                  )}
+                  {/* Redeem tab: same redemption-vault liquidity, shown in the payment asset to match
+                      the request-fallback notice ("Instant liquidity is <X> tUSDC"). */}
+                  {tab === "redeem" && (
+                    <InfoRow
+                      label="Instant liquidity"
+                      value={
+                        liquidityInPaymentAsset != null
+                          ? `${compactNumber(liquidityInPaymentAsset)} ${assetLabel(product.paymentAssetSymbol)}`
+                          : "—"
+                      }
+                    />
+                  )}
+                  <InfoRow
+                    label="Redemption Timeline"
+                    value={cfg.redemptionTimelineDays != null ? `${cfg.redemptionTimelineDays} Days` : "30-90 Business Days"}
+                  />
+                  {/* Copy: "Transaction Fees" (approved rename from "Fee Structure"). */}
+                  <InfoRow label="Transaction Fees" expandable>
+                    <GiwaFeeBreakdown
+                      mintingBps={cfg.feeInstantMintingBps}
+                      redemptionBps={cfg.feeInstantRedemptionBps}
+                      // Router buy: the Reserve's swap fee for the coin paid with (USDT, RLUSD; none for USDC, ArcoUSD).
+                      swapFee={routedPay ? stablecoinSwapFee(routedPay, payAssets) : null}
+                    />
+                  </InfoRow>
+                </>
+              )}
+            </div>
+            {liquidityShort && !pausedNotice && !insufficientBalance && (
+              <div className={`${INVEST_NOTICE} text-[var(--color-arco-text-soft)]`}>
+                <AlertCircle className="mt-0.5 size-4 shrink-0" />
+                <span className="break-words">
+                  {`Instant liquidity is ${compactNumber(liquidityInPaymentAsset ?? 0)} ${assetLabel(product.paymentAssetSymbol)}. This is processed as a redemption request — your ${product.symbol} is redeemed now and the ${assetLabel(product.paymentAssetSymbol)} payout follows after processing.`}
+                </span>
+              </div>
+            )}
+            <button
+              type="button"
+              disabled={busy || phase === "missing-payment-token" || phase === "loading-registry" || Boolean(pausedNotice) || insufficientBalance}
+              onClick={runPrimary}
+              className={`${INVEST_CTA} ${busy ? INVEST_CTA_BUSY : INVEST_CTA_READY}`}
+            >
+              {busy && <Loader2 className="size-4 animate-spin" />}
+              {busy ? "Processing the transaction" : actionLabel}
+            </button>
+          </>
+        )}
+      </div>
+
+      {pausedNotice && (
+        <div className={`${INVEST_NOTICE} text-[var(--color-arco-text-soft)]`}>
+          <AlertCircle className="mt-0.5 size-4 shrink-0" />
+          <span className="break-words">{pausedNotice}</span>
+        </div>
+      )}
+      {(error || phase === "failed") && (
+        <div className={`${INVEST_NOTICE} text-[var(--color-arco-down)]`}>
+          <AlertCircle className="mt-0.5 size-4 shrink-0" />
+          <span className="break-words">{error ?? "Transaction failed"}</span>
+        </div>
+      )}
+      {(phase === "success" || phase === "pending-redemption") && (
+        <div className={INVEST_NOTICE}>
+          <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-[var(--color-arco-up)]" />
+          <div className="flex flex-col gap-0.5">
+            <span className="font-medium text-[var(--color-arco-ink)]">{successLabel ?? "Transaction confirmed"}</span>
+            {txHashes[0] && (
+              <a href={explorerTx(txHashes[0])} target="_blank" rel="noreferrer" className="font-mono text-[var(--color-arco-up)] underline">
+                View on GIWA explorer
+              </a>
+            )}
+          </div>
+        </div>
+      )}
+      {payPicker && (
+        <SavingsAssetPicker
+          open={payPickerOpen}
+          onClose={() => setPayPickerOpen(false)}
+          choices={payChoices}
+          selected={payAssetOptionKey(routedPay) ?? ""}
+          onSelect={(key) => {
+            setPayPickerOpen(false)
+            const next = payAssetForOption(payAssets, key)
+            // While a transaction runs the asset cannot change (the panel must keep naming what is in flight).
+            if (next !== null && next.key !== routedPay.key && !busy) onPayAssetChange(next.key)
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+// Redemption payouts are executed by the admin via a DIRECT transfer — there is no user Claim
+// step, so the Pending tab is a read-only status list (legacy PendingList card layout).
+function toBigIntSafe(value: string | null | undefined): bigint {
+  try {
+    return BigInt(value ?? "0")
+  } catch {
+    return 0n
+  }
+}
+
+function redemptionDate(value: string | null | undefined): string {
+  if (!value) return "—"
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return "—"
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+}
+
+// REQUESTED → Pending; FULFILLED/CLAIMED (legacy claim model) and SETTLED/COMPLETED (Part B
+// direct-transfer model) → Completed; unknown statuses render raw.
+function redemptionBadge(status: string): { label: string; tone: string } {
+  const normalized = status.toUpperCase()
+  // SETTLING = admin payout in flight; to the investor that is still "Pending".
+  if (normalized === "REQUESTED" || normalized === "SETTLING") {
+    return { label: "Pending", tone: "text-[var(--color-arco-text-soft)]" }
+  }
+  if (["FULFILLED", "CLAIMED", "SETTLED", "COMPLETED"].includes(normalized)) {
+    return { label: "Completed", tone: "text-[var(--color-arco-up)]" }
+  }
+  if (normalized === "FAILED") return { label: "Failed", tone: "text-[var(--color-arco-down)]" }
+  return { label: status, tone: "text-[var(--color-arco-text-soft)]" }
+}
+
+export function PendingRedemptionList({
+  rows,
+  product,
+  price,
+}: {
+  rows: GiwaRedemption[]
+  product: GiwaCatalogItem
+  price?: number | null
+}) {
+  if (!rows.length) {
+    return <p className="py-8 text-center text-sm text-[var(--color-arco-muted)]">No pending redemptions.</p>
+  }
+
+  const paymentDecimals = product.paymentAsset?.decimals ?? 18
+  const baseSymbol = baseAssetSymbol(product.paymentAssetSymbol)
+  const isUsd = baseSymbol === "USDC"
+  const pendingTimelineDays = vaultConfigOf(product).redemptionTimelineDays
+
+  return (
+    <ul className="space-y-3">
+      {rows.map((row) => {
+        const badge = redemptionBadge(row.status)
+        const completed = badge.label === "Completed"
+        const sharesRaw = toBigIntSafe(row.sharesIn)
+        const shares = Number(formatUnits(sharesRaw, 18))
+        const lockedRaw = toBigIntSafe(row.lockedAssetsOut)
+        // Payout preview: the locked amount recorded at request time; else shares × NAV/share.
+        // Always convert to HUMAN units before multiplying — never math on the raw base units.
+        const expected =
+          lockedRaw > 0n
+            ? Number(formatUnits(lockedRaw, paymentDecimals))
+            : typeof price === "number"
+              ? shares * price
+              : null
+        const expectedText =
+          expected === null ? "—" : isUsd ? moneyLabel(expected) : `${quoteText(expected)} ${baseSymbol}`
+        // Part B (direct transfer) writes settledAt; fulfilledAt is the legacy-claim fallback only.
+        // The pending estimate is config-first (same override as the Redemption Timeline row).
+        const settlementText = completed
+          ? redemptionDate(row.settledAt ?? row.fulfilledAt)
+          : pendingTimelineDays != null
+            ? `${pendingTimelineDays} Days`
+            : "30-90 Business Days"
+
+        return (
+          <li key={row.requestId} className="rounded-[var(--radius-card)] bg-[var(--color-arco-surface-muted)] p-3 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="font-mono text-[var(--color-arco-ink)]">ARCO-{row.requestId}</span>
+              <span className={`rounded-[var(--radius-pill)] bg-[var(--color-arco-chip)] px-2 py-0.5 ${badge.tone}`}>
+                {badge.label}
+              </span>
+            </div>
+            <dl className="mt-2 space-y-1">
+              <KeyValue label="Redeem amount" value={`${quoteText(shares)} ${product.symbol}`} />
+              <KeyValue label={`Expected ${baseSymbol}`} value={expectedText} />
+              <KeyValue label="Requested At" value={redemptionDate(row.createdAt)} />
+              <KeyValue label="Est. Settlement" value={settlementText} />
+            </dl>
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+
+function KeyValue({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between">
+      <dt className="text-[var(--color-arco-muted)]">{label}</dt>
+      <dd className="tabular-nums text-[var(--color-arco-text-soft)]">{value}</dd>
+    </div>
+  )
+}
+
+export function WalletSummary() {
+  const wallet = useGiwaWallet()
+  return (
+    <section className="grid gap-3 md:grid-cols-3">
+      <InfoTile label="Network" value={networkLabel(wallet.chainId)} />
+      <InfoTile label="Native ETH" value={wallet.nativeBalance ? Number(wallet.nativeBalance).toFixed(5) : "--"} />
+      <a
+        href={GIWA_FAUCET_URL}
+        target="_blank"
+        rel="noreferrer"
+        className="rounded-[var(--radius-card)] bg-[var(--color-arco-surface)] p-4 shadow-[var(--shadow-control)]"
+      >
+        <span className="text-xs text-[var(--color-arco-muted)]">Official faucet</span>
+        <span className="mt-1 flex items-center gap-2 text-sm font-semibold text-[var(--color-arco-ink)]">
+          Open GIWA faucet <ExternalLink className="size-3" />
+        </span>
+      </a>
+    </section>
+  )
+}
+
+function InfoTile({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-[var(--radius-card)] bg-[var(--color-arco-surface)] p-4 shadow-[var(--shadow-control)]">
+      <p className="text-xs text-[var(--color-arco-muted)]">{label}</p>
+      <p className="mt-1 break-words text-sm font-semibold text-[var(--color-arco-ink)]">{value}</p>
+    </div>
+  )
+}
+
+export function GiwaTokenBalances({
+  balances,
+}: {
+  balances: Array<{ symbol: string; balance: string; decimals: number }>
+}) {
+  return (
+    <section className="grid gap-3 md:grid-cols-4">
+      {balances.map((asset) => (
+        <div key={asset.symbol} className="rounded-[var(--radius-card)] bg-[var(--color-arco-surface)] p-4 shadow-[var(--shadow-control)]">
+          <div className="flex items-center gap-2">
+            <GiwaBrandMark src={paymentAssetIcon(asset.symbol)} label={asset.symbol} size={22} />
+            <p className="text-xs text-[var(--color-arco-muted)]">{asset.symbol}</p>
+          </div>
+          <p className="mt-2 tabular-nums text-lg font-medium text-[var(--color-arco-ink)]">{asset.balance}</p>
+          <p className="mt-1 text-[11px] text-[var(--color-arco-muted)]">{asset.decimals} decimals</p>
+        </div>
+      ))}
+    </section>
+  )
+}
+
+export function GiwaPortfolioCard({ portfolio }: { portfolio: GiwaPortfolio | undefined }) {
+  const positionCount = Array.isArray(portfolio?.positions) ? portfolio.positions.length : 0
+  const redemptionCount = portfolio?.redemptions?.length ?? 0
+  return (
+    <div className="flex items-start justify-between gap-6 rounded-[var(--radius-strategy)] bg-[var(--color-arco-surface)] p-6 shadow-[var(--shadow-control)]">
+      <div className="flex flex-col gap-1">
+        <span className="text-sm text-[var(--color-arco-muted)]">Net Worth</span>
+        <span className="tabular-nums text-4xl font-medium tracking-tight text-[var(--color-arco-ink)]">{moneyLabel(null)}</span>
+        <span className="text-xs text-[var(--color-arco-muted)]">Indexed from backend portfolio service</span>
+      </div>
+      <div className="rounded-[var(--radius-card)] bg-[var(--color-arco-surface-muted)] px-5 py-3 shadow-[var(--shadow-control)]">
+        <span className="text-xs text-[var(--color-arco-muted)]">Wallet state</span>
+        <div className="mt-1 flex items-center gap-4">
+          <span className="tabular-nums text-2xl font-medium text-[var(--color-arco-ink)]">{positionCount}</span>
+          <span className="rounded-[var(--radius-control)] bg-[var(--color-arco-chip)] px-2 py-1 text-xs text-[var(--color-arco-text-soft)]">
+            {redemptionCount} redemptions
+          </span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// One holdings-row Price/24hΔ cell: the current NAV/share plus its signed 24h change. `null`
+// (vault has no price history) renders "—".
+export type HoldingPriceCell = { price: string; deltaText: string; up: boolean } | null
+
+export function GiwaHoldingsTable({
+  portfolio,
+  products,
+  depositUsd,
+  apyValues,
+  priceCells,
+  sortKey,
+  sortDir,
+  onSort,
+}: {
+  portfolio: GiwaPortfolio | undefined
+  products: GiwaCatalogItem[]
+  depositUsd?: (string | null)[]
+  apyValues?: (string | null)[]
+  priceCells?: HoldingPriceCell[]
+  sortKey?: "balance" | "delta" | "deposit" | "apy"
+  sortDir?: "asc" | "desc"
+  onSort?: (key: "balance" | "delta" | "deposit" | "apy") => void
+}) {
+  const positions = Array.isArray(portfolio?.positions) ? portfolio.positions : []
+  return (
+    <div
+      className="overflow-x-auto rounded-[var(--radius-card)] bg-[var(--color-arco-surface-30)] p-5"
+      style={{ boxShadow: "var(--shadow-table)" }}
+    >
+      <div className={`grid min-w-[860px] ${HOLDING_COLS} items-center px-1.5 pb-2`}>
+        <span className={HEAD}>Product</span>
+        <button
+          type="button"
+          onClick={() => onSort?.("balance")}
+          className={`${HEAD} flex items-center justify-end gap-1 hover:text-[var(--color-arco-ink)]`}
+        >
+          Balance <SortChevrons active={sortKey === "balance" ? sortDir : undefined} />
+        </button>
+        <button
+          type="button"
+          onClick={() => onSort?.("delta")}
+          className={`${HEAD} flex items-center justify-end gap-1 hover:text-[var(--color-arco-ink)]`}
+        >
+          Price/24hΔ <SortChevrons active={sortKey === "delta" ? sortDir : undefined} />
+        </button>
+        <button
+          type="button"
+          onClick={() => onSort?.("deposit")}
+          className={`${HEAD} flex items-center justify-end gap-1 hover:text-[var(--color-arco-ink)]`}
+        >
+          Your Deposit <SortChevrons active={sortKey === "deposit" ? sortDir : undefined} />
+        </button>
+        <button
+          type="button"
+          onClick={() => onSort?.("apy")}
+          className={`${HEAD} flex items-center justify-end gap-1 hover:text-[var(--color-arco-ink)]`}
+        >
+          APY <SortChevrons active={sortKey === "apy" ? sortDir : undefined} />
+        </button>
+        <span className={`${HEAD} text-center`}>Network</span>
+      </div>
+      <div className="flex min-w-[860px] flex-col gap-2.5">
+        {positions.length ? (
+          positions.map((position, index) => {
+            const product = products.find((item) => item.productId === positionProductId(position))
+            const symbol = product ? tokenSymbolFor(product) : String(positionValue(position, "symbol") ?? "Product")
+            // Config-first identity — same resolvers as the products vault list (GiwaCatalogRow).
+            const config = product ? vaultConfigOf(product) : undefined
+            // A holding outside the GIWA catalog (a Stocks token) names itself: displayName, categoryLabel, imageUrl.
+            const own = (key: string) => {
+              const value = positionValue(position, key)
+              return typeof value === "string" && value ? value : undefined
+            }
+            const priceCell = priceCells?.[index] ?? null
+            return (
+              <div key={`${symbol}-${index}`} className={`relative grid h-[59px] ${HOLDING_COLS} items-center rounded-[var(--radius-row)] bg-[var(--color-arco-surface)] px-1.5`}>
+                <div className="flex items-center gap-2.5 pl-1">
+                  <GiwaBrandMark src={product ? vaultImageFor(product) : own("imageUrl")} label={symbol} size={35} />
+                  <div className="flex flex-col">
+                    <span className="text-base font-medium leading-5 text-[var(--color-arco-ink)]">{config?.displayName ?? (product ? symbol : own("displayName") ?? symbol)}</span>
+                    <span className="mt-1 w-fit rounded-full bg-[var(--color-arco-chip)] px-1.5 py-0.5 text-[11px] leading-none text-[var(--color-arco-ink)] ring-[0.5px] ring-[var(--color-arco-border)]">
+                      {product ? (config?.category ? categoryTitle(config.category) : productType(product)) : own("categoryLabel") ?? "Position"}
+                    </span>
+                  </div>
+                </div>
+                <div className="px-1.5 text-right text-sm tabular-nums text-[var(--color-arco-ink)]">{tokenLabel(positionValue(position, "balance"), symbol)}</div>
+                <div className="px-1.5 text-right text-sm tabular-nums text-[var(--color-arco-ink)]">
+                  {priceCell ? (
+                    <>
+                      {priceCell.price}{" "}
+                      <span className={priceCell.up ? "text-[var(--color-arco-delta-up)]" : "text-[var(--color-arco-delta-down)]"}>
+                        ({priceCell.deltaText})
+                      </span>
+                    </>
+                  ) : (
+                    "—"
+                  )}
+                </div>
+                <div className="px-1.5 text-right text-sm tabular-nums text-[var(--color-arco-ink)]">{depositUsd?.[index] ?? "—"}</div>
+                <div className="px-1.5 text-right text-sm tabular-nums text-[var(--color-arco-ink)]">{apyValues?.[index] ?? "—"}</div>
+                <div className="flex justify-center"><GiwaNetworkIcon size={20} /></div>
+              </div>
+            )
+          })
+        ) : (
+          <div className="rounded-[var(--radius-row)] bg-[var(--color-arco-surface)] px-6 py-10 text-center text-sm text-[var(--color-arco-muted)]">
+            No indexed holdings yet.
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// Renders the ALREADY-BUILT feed (buildActivityFeed output) — never raw indexed events. Every
+// cell is a resolved ActivityRow field: human datetime, config-first vault identity, human type
+// label + amount. Non-deposit/redeem events (FaucetDrip, PriceUpdated, …) are filtered upstream.
+export function GiwaActivityTable({ rows }: { rows: ActivityRow[] }) {
+  const rowClass = `relative grid h-[59px] ${ACTIVITY_COLS} items-center rounded-[var(--radius-row)] bg-[var(--color-arco-surface)] px-1.5`
+  return (
+    <div
+      className="overflow-x-auto rounded-[var(--radius-card)] bg-[var(--color-arco-surface-30)] p-5"
+      style={{ boxShadow: "var(--shadow-table)" }}
+    >
+      <div className={`grid min-w-[850px] ${ACTIVITY_COLS} items-center px-1.5 pb-2`}>
+        <span className={HEAD}>Date</span>
+        <span className={HEAD}>Product</span>
+        <span className={HEAD}>Type</span>
+        <span className={`${HEAD} flex items-center gap-1`}>Amount <SortChevrons /></span>
+        <span className={`${HEAD} flex items-center gap-1`}>TxID <SortChevrons /></span>
+        <span className={`${HEAD} text-center`}>Network</span>
+      </div>
+      <div className="flex min-w-[850px] flex-col gap-2.5">
+        {rows.length ? (
+          rows.slice(0, 12).map((row) => {
+            const cells = (
+              <>
+                <div className="font-mono text-sm tabular-nums text-[var(--color-arco-ink)]">{row.date}</div>
+                <div className="flex items-center gap-2.5 pl-1">
+                  <GiwaBrandMark src={row.product.imageUrl} label={row.product.symbol} size={35} />
+                  <div className="flex flex-col">
+                    <span className="text-base font-medium leading-5 text-[var(--color-arco-ink)]">{row.product.name}</span>
+                    {row.product.category && (
+                      <span className="mt-1 w-fit rounded-full bg-[var(--color-arco-chip)] px-1.5 py-0.5 text-[11px] leading-none text-[var(--color-arco-ink)] ring-[0.5px] ring-[var(--color-arco-border)]">
+                        {row.product.category}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div className={`text-sm ${row.typeTone}`}>{row.typeLabel}</div>
+                <div className="tabular-nums text-sm text-[var(--color-arco-ink)]">{row.amount}</div>
+                <div className="font-mono text-sm text-[var(--color-arco-ink)]">{row.txHash ? shortAddr(row.txHash) : "—"}</div>
+                <div className="flex justify-center"><GiwaNetworkIcon size={20} /></div>
+              </>
+            )
+            // A row without a tx hash (shouldn't happen for indexed rows) stays unlinked.
+            return row.txHash ? (
+              <a key={row.key} href={explorerTx(row.txHash)} target="_blank" rel="noreferrer" className={rowClass}>
+                {cells}
+              </a>
+            ) : (
+              <div key={row.key} className={rowClass}>
+                {cells}
+              </div>
+            )
+          })
+        ) : (
+          <div className="rounded-[var(--radius-row)] bg-[var(--color-arco-surface)] px-6 py-10 text-center text-sm text-[var(--color-arco-muted)]">
+            No indexed activity yet.
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+export function GiwaRedemptionsPanel({ redemptions }: { redemptions: GiwaRedemption[] }) {
+  return (
+    <div className="rounded-[var(--radius-strategy)] bg-[var(--color-arco-surface)] p-5 shadow-[var(--shadow-control)]">
+      <div className="flex items-start justify-between gap-3">
+        <h3 className="text-sm font-semibold text-[var(--color-arco-ink)]">Redemptions</h3>
+        <span className="rounded-[var(--radius-pill)] bg-[var(--color-arco-chip)] px-2 py-0.5 text-xs text-[var(--color-arco-text-soft)]">
+          {redemptions.length} indexed
+        </span>
+      </div>
+      <ul className="mt-4 space-y-3">
+        {redemptions.length ? (
+          redemptions.slice(0, 6).map((redemption) => (
+            <li key={redemption.requestId} className="rounded-[var(--radius-card)] bg-[var(--color-arco-surface-muted)] p-3 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="font-mono text-[var(--color-arco-ink)]">Request {redemption.requestId}</span>
+                <span className="rounded-[var(--radius-pill)] bg-[var(--color-arco-chip)] px-2 py-0.5 text-[var(--color-arco-text-soft)]">
+                  {redemption.status}
+                </span>
+              </div>
+              <dl className="mt-2 space-y-1">
+                <KeyValue label="Shares" value={redemption.sharesIn} />
+                <KeyValue label="Locked assets" value={redemption.lockedAssetsOut} />
+              </dl>
+            </li>
+          ))
+        ) : (
+          <li className="py-8 text-center text-sm text-[var(--color-arco-muted)]">No redemption requests yet.</li>
+        )}
+      </ul>
+    </div>
+  )
+}
+
+export function ActivityPanel({
+  activity,
+  redemptions,
+  products = [],
+}: {
+  activity: GiwaActivity[]
+  redemptions: GiwaRedemption[]
+  products?: GiwaCatalogItem[]
+}) {
+  return (
+    <section className="grid gap-4 lg:grid-cols-[1fr_360px]">
+      <GiwaActivityTable rows={buildActivityFeed(activity, redemptions, products)} />
+      <GiwaRedemptionsPanel redemptions={redemptions} />
+    </section>
+  )
+}
+
+export function AdminNotice() {
+  return (
+    <div className="rounded-[var(--radius-card)] border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+      <div className="flex items-center gap-2 font-semibold">
+        <ShieldCheck className="size-4" />
+        Tier 2 only
+      </div>
+      <p className="mt-1">
+        This screen requests unsigned operational transactions only. Upgrade, ProxyAdmin, defaultAdmin, and role-granting
+        Tier 1 actions are intentionally absent.
+      </p>
+    </div>
+  )
+}

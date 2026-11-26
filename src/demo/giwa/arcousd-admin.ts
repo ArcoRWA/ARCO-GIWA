@@ -1,0 +1,571 @@
+import type {
+  GiwaArcoUSDAlert,
+  GiwaArcoUSDAlertDelivery,
+  GiwaArcoUSDAlerts,
+  GiwaArcoUSDKeeper,
+  GiwaArcoUSDKeeperReport,
+  GiwaArcoUSDQueue,
+  GiwaArcoUSDReserve,
+  GiwaArcoUSDSavingsState,
+} from "./types"
+
+// Pure helpers for the admin ArcoUSD page (AdminArcoUSD.tsx): number formatting, the gate and
+// pause readouts, and the queue head's "can it be paid now" verdict. No React, no I/O.
+
+export type ArcoUSDAdminTab = "overview" | "queue" | "flows" | "savings"
+export const ARCOUSD_ADMIN_TABS: readonly { id: ArcoUSDAdminTab; label: string }[] = [
+  { id: "overview", label: "Overview" },
+  { id: "queue", label: "Queue" },
+  { id: "flows", label: "Flows" },
+  { id: "savings", label: "Savings" },
+]
+
+export function arcoUSDAdminTab(value: string | null): ArcoUSDAdminTab {
+  return value === "queue" || value === "flows" || value === "savings" ? value : "overview"
+}
+
+/** "$1,234.56" from a decimal string (max 2 decimals, no forced trailing zeros); "—" when not a number. */
+export function usdText(value: string | number | null | undefined): string {
+  const amount = typeof value === "number" ? value : Number(value)
+  if (value === null || value === undefined || value === "" || !Number.isFinite(amount)) return "—"
+  const sign = amount < 0 ? "-" : ""
+  return `${sign}$${Math.abs(amount).toLocaleString("en-US", { maximumFractionDigits: 2 })}`
+}
+
+/** Axis labels: "$950", "$12.5K", "$28.53M", "$1.2B" (max 2 decimals). */
+export function usdCompact(value: number): string {
+  if (!Number.isFinite(value)) return "—"
+  const abs = Math.abs(value)
+  const sign = value < 0 ? "-" : ""
+  const [scaled, unit] = abs >= 1e9 ? [abs / 1e9, "B"] : abs >= 1e6 ? [abs / 1e6, "M"] : abs >= 1e3 ? [abs / 1e3, "K"] : [abs, ""]
+  return `${sign}$${Number(scaled.toFixed(2))}${unit}`
+}
+
+/** "1,234.5" (max 2 decimals by default); "—" when not a number. */
+export function amountText(value: string | number | null | undefined, maxDecimals = 2): string {
+  const amount = typeof value === "number" ? value : Number(value)
+  if (value === null || value === undefined || value === "" || !Number.isFinite(amount)) return "—"
+  return amount.toLocaleString("en-US", { maximumFractionDigits: maxDecimals })
+}
+
+/** "50%" from basis points (max 2 decimals). */
+export function bpsText(bps: number | null | undefined): string {
+  if (bps === null || bps === undefined || !Number.isFinite(bps)) return "—"
+  return `${Number((bps / 100).toFixed(2))}%`
+}
+
+/** "2d 4h", "3h 20m", "12m", "45s". */
+export function durationText(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds) || seconds < 0) return "—"
+  const s = Math.floor(seconds)
+  const days = Math.floor(s / 86_400)
+  const hours = Math.floor((s % 86_400) / 3_600)
+  const minutes = Math.floor((s % 3_600) / 60)
+  if (days > 0) return hours > 0 ? `${days}d ${hours}h` : `${days}d`
+  if (hours > 0) return `${hours}h ${minutes}m`
+  if (minutes > 0) return `${minutes}m`
+  return `${s}s`
+}
+
+/** "1 buy" / "3 buys". */
+export function countText(count: number, noun: string, plural = `${noun}s`): string {
+  return `${count} ${count === 1 ? noun : plural}`
+}
+
+export function shortAddress(address: string | null | undefined): string {
+  return address && address.length > 12 ? `${address.slice(0, 6)}…${address.slice(-4)}` : (address ?? "—")
+}
+
+const GATE_REASON: Record<string, string> = {
+  "not-deployed": "ArcoUSD is not deployed",
+  "read-failed": "The reserve could not be read",
+  "settlement-paused": "Settlement is paused (Reserve, settleFor, ArcoUSD or burn)",
+  "buy-paused": "Buys are paused (Router, deposit or mint)",
+  "mint-cap": "Less than one threshold-sized buy left under the mint cap",
+  "insufficient-buffer": "The settlement buffer is below the threshold",
+  "asset-missing": "The gate asset is not a Reserve asset",
+  "config-invalid": "The buy gate setting is invalid (ARCOUSD_BUY_GATE_*)",
+}
+
+/** Gate status line: "Open", "Closed: <why>", "Inactive". */
+export function gateText(gate: GiwaArcoUSDReserve["gate"]): { status: "open" | "closed" | "inactive"; label: string; detail: string | null } {
+  if (gate.status === "open") return { status: "open", label: "Open", detail: null }
+  if (gate.status === "inactive") return { status: "inactive", label: "Inactive", detail: GATE_REASON["not-deployed"] }
+  return { status: "closed", label: "Closed", detail: gate.reason ? (GATE_REASON[gate.reason] ?? gate.reason) : null }
+}
+
+export type PauseRow = { readonly label: string; readonly paused: boolean; readonly effect: string }
+
+/** Every pause on the buy and settlement path, in the order a buy meets them, then queue payouts. */
+export function pauseRows(reserve: NonNullable<GiwaArcoUSDReserve["reserve"]>): PauseRow[] {
+  return [
+    { label: "Router buy", paused: reserve.routerPaused, effect: "Fund buys through the Router" },
+    { label: "Reserve deposit", paused: reserve.depositPaused, effect: "Stablecoin deposits and stablecoin-paid buys" },
+    { label: "ArcoUSD mint", paused: reserve.arcoUSDMintPaused, effect: "Deposits (mint) and stablecoin-paid buys" },
+    { label: "Reserve settleFor", paused: reserve.settlementPaused, effect: "Every fund buy" },
+    { label: "ArcoUSD burn", paused: reserve.arcoUSDBurnPaused, effect: "Settlement and queue payouts" },
+    { label: "Reserve processQueue", paused: reserve.queuePaused ?? false, effect: "Standard-queue payouts (requests keep their place)" },
+    { label: "Reserve (all)", paused: reserve.reservePaused, effect: "Every Reserve function except cancel" },
+    { label: "ArcoUSD (all)", paused: reserve.arcoUSDPaused, effect: "Mint and burn (transfers continue)" },
+  ]
+}
+
+/** Room left under the mint cap in USD (liabilities = ArcoUSD supply); null when unreadable. */
+export function mintHeadroomUsd(reserve: NonNullable<GiwaArcoUSDReserve["reserve"]>): number | null {
+  try {
+    const left = BigInt(reserve.mintCap) - BigInt(reserve.totalLiabilities)
+    return Number(left) / 1e18
+  } catch {
+    return null
+  }
+}
+
+export type HeadVerdict =
+  | { readonly kind: "empty" }
+  | { readonly kind: "paused" }
+  | { readonly kind: "payable" }
+  | { readonly kind: "waiting-delay"; readonly until: string }
+  | { readonly kind: "waiting-liquidity"; readonly shortBy: string }
+  | { readonly kind: "unknown" }
+
+/**
+ * Whether processQueue would pay the head now. It pays from the Reserve's whole BALANCE of the
+ * asset (not `available`, which already subtracts the queue itself), once the head is past
+ * queueMinDelay, and nothing it calls is paused (the Reserve, or ArcoUSD itself / its burn: a payout
+ * burns the escrow). The server's process-queue preview is the authoritative answer.
+ */
+export function headVerdict(
+  summary: GiwaArcoUSDQueue["assets"][number],
+  reserveAssets: readonly { address: string; balance: string; decimals: number }[],
+  now: number,
+  paused = false,
+): HeadVerdict {
+  if (!summary.head) return { kind: "empty" }
+  if (paused) return { kind: "paused" }
+  if (Date.parse(summary.head.eligibleAt) > now) return { kind: "waiting-delay", until: summary.head.eligibleAt }
+  const asset = reserveAssets.find((item) => item.address.toLowerCase() === summary.asset.toLowerCase())
+  if (!asset) return { kind: "unknown" }
+  try {
+    const balance = BigInt(asset.balance)
+    const head = BigInt(summary.head.assetAmount)
+    if (balance >= head) return { kind: "payable" }
+    const short = Number(head - balance) / 10 ** asset.decimals
+    return { kind: "waiting-liquidity", shortBy: amountText(short) }
+  } catch {
+    return { kind: "unknown" }
+  }
+}
+
+export const QUEUE_FILTERS: readonly { id: GiwaArcoUSDQueue["filter"]; label: string }[] = [
+  { id: "open", label: "Open (queued + failed)" },
+  { id: "QUEUED", label: "Queued" },
+  { id: "PAYOUT_FAILED", label: "Payout failed" },
+  { id: "PAID", label: "Paid" },
+  { id: "CANCELLED", label: "Cancelled" },
+  { id: "all", label: "All" },
+]
+
+export function queueFilter(value: string | null): GiwaArcoUSDQueue["filter"] {
+  return QUEUE_FILTERS.some((filter) => filter.id === value) ? (value as GiwaArcoUSDQueue["filter"]) : "open"
+}
+
+export const FLOW_WINDOWS = [7, 30, 90] as const
+
+/** processQueue batch size from a text field: 1..50, else null. */
+export function batchSize(value: string): number | null {
+  if (!/^\d+$/.test(value.trim())) return null
+  const count = Number(value.trim())
+  return count >= 1 && count <= 50 ? count : null
+}
+
+const EVENT_LABEL: Record<string, string> = {
+  Deposited: "Deposit",
+  RedeemedInstant: "Instant redemption",
+  RedeemQueued: "Redemption queued",
+  RedeemPaid: "Queue payout",
+  RedeemPayoutFailed: "Payout failed",
+  RedeemCancelled: "Redemption cancelled",
+  SettledFor: "Fund settlement",
+  Bought: "Router buy",
+  Allocated: "MMF allocation",
+  RecalledInstant: "MMF recall (instant)",
+  RecallRequested: "MMF recall requested",
+  RecallClaimed: "MMF recall claimed",
+  RecallAcknowledged: "MMF recall acknowledged",
+}
+
+export function eventLabel(name: string): string {
+  return EVENT_LABEL[name] ?? name
+}
+
+/** Queue payouts stop while the Reserve, its processQueue, ArcoUSD or ArcoUSD burn is paused. */
+export function payoutsPaused(reserve: GiwaArcoUSDReserve["reserve"] | null | undefined): boolean {
+  return Boolean(reserve && (reserve.reservePaused || reserve.queuePaused || reserve.arcoUSDPaused || reserve.arcoUSDBurnPaused))
+}
+
+// ── Alerts ──────────────────────────────────────────────────────────────────
+
+export type AlertTone = "negative" | "attention" | "neutral" | "positive"
+
+/** Pill label and tone: open alerts by severity, then waiting and cleared ones. */
+export function alertBadge(alert: Pick<GiwaArcoUSDAlert, "status" | "severity">): { label: string; tone: AlertTone } {
+  if (alert.status === "RESOLVED") return { label: "Resolved", tone: "positive" }
+  if (alert.status === "PENDING") return { label: "Pending", tone: "neutral" }
+  return alert.severity === "CRITICAL" ? { label: "Critical", tone: "negative" } : { label: "Warning", tone: "attention" }
+}
+
+/** "just now", "12m ago", "2h 5m ago". */
+export function agoText(iso: string | null | undefined, now: number): string {
+  if (!iso) return "—"
+  const seconds = (now - Date.parse(iso)) / 1000
+  if (!Number.isFinite(seconds)) return "—"
+  return seconds < 60 ? "just now" : `${durationText(seconds)} ago`
+}
+
+/** The line under an alert: how long it has been open / waiting / since it cleared, and the last send. */
+export function alertMeta(alert: GiwaArcoUSDAlert, now: number): string {
+  if (alert.status === "RESOLVED") return `Resolved ${agoText(alert.resolvedAt, now)}`
+  if (alert.status === "PENDING") return `Seen ${agoText(alert.firstSeenAt, now)}; sent only if it lasts`
+  const sent = alert.lastNotifiedAt ? `last sent ${agoText(alert.lastNotifiedAt, now)}` : "not sent yet"
+  return `Open ${durationText((now - Date.parse(alert.openedAt ?? alert.firstSeenAt)) / 1000)} · ${sent}`
+}
+
+/** Whether the watcher is alive: never ran, stopped running, failed its last round, or fine. */
+export function watcherStatus(alerts: Pick<GiwaArcoUSDAlerts, "watcher">, now: number): { tone: AlertTone; text: string } {
+  const watcher = alerts.watcher
+  if (!watcher) return { tone: "attention", text: "The watcher has not run yet. It runs in the indexer worker once ArcoUSD is deployed." }
+  if (watcher.stale) return { tone: "negative", text: `The watcher last ran ${agoText(watcher.lastRunAt, now)}. The indexer worker may be down.` }
+  if (watcher.lastError) return { tone: "negative", text: `The watcher's last run failed ${agoText(watcher.lastRunAt, now)}: ${watcher.lastError}` }
+  const ran = `The watcher ran ${agoText(watcher.lastRunAt, now)}.`
+  return watcher.reconciled === false
+    ? { tone: "attention", text: `${ran} It could not compare the queue with the chain this time (indexer behind, or its block unreadable).` }
+    : { tone: "positive", text: ran }
+}
+
+const CHANNEL_LABEL: Record<string, string> = { telegram: "Telegram", slack: "Slack" }
+
+/** "Telegram: sent · Slack: failed (Slack answered 404)". */
+export function deliveryText(delivery: GiwaArcoUSDAlertDelivery): string {
+  const parts = Object.entries(delivery).map(([channel, result]) =>
+    `${CHANNEL_LABEL[channel] ?? channel}: ${result?.ok ? "sent" : `failed${result?.error ? ` (${result.error})` : ""}`}`,
+  )
+  return parts.length ? parts.join(" · ") : "No channel answered"
+}
+
+export function channelLabel(id: string): string {
+  return CHANNEL_LABEL[id] ?? id
+}
+
+// ── Queue keeper ────────────────────────────────────────────────────────────
+
+/**
+ * Mode pill: Off / Dry run / Live, then its trouble the way the watcher judges it: Not running (stale),
+ * Failing (no good round for 10 minutes), or Retrying (the last round failed, the one before was fine).
+ */
+export function keeperBadge(keeper: GiwaArcoUSDKeeper["keeper"], now: number = Date.now()): { label: string; tone: AlertTone } {
+  const mode = keeper?.report?.mode
+  if (!keeper || !mode || mode === "off") return { label: "Off", tone: "neutral" }
+  const name = mode === "live" ? "Live" : "Dry run"
+  if (keeper.stale) return { label: "Not running", tone: "negative" }
+  if (keeper.lastError) {
+    const lastOk = keeper.lastOkAt ? Date.parse(keeper.lastOkAt) : Number.NaN
+    const failing = !Number.isFinite(lastOk) || now - lastOk > 10 * 60_000
+    return failing ? { label: `${name} · failing`, tone: "negative" } : { label: `${name} · retrying`, tone: "attention" }
+  }
+  return mode === "live" ? { label: name, tone: "positive" } : { label: name, tone: "attention" }
+}
+
+/**
+ * "0.0123 ETH" from wei. Gas, not a financial value: up to 4 decimals so a nearly empty wallet does not
+ * read as 0 (the 2-decimal rule is for money shown to customers).
+ */
+export function gasText(wei: string | null | undefined): string {
+  if (!wei || !/^\d+$/.test(wei)) return "—"
+  const value = Number(BigInt(wei)) / 1e18
+  return `${value.toLocaleString("en-US", { maximumFractionDigits: 4 })} ETH`
+}
+
+const TX_STATUS: Record<NonNullable<GiwaArcoUSDKeeperReport["lastTx"]>["status"], { label: string; tone: AlertTone }> = {
+  pending: { label: "Pending", tone: "attention" },
+  success: { label: "Mined", tone: "positive" },
+  reverted: { label: "Reverted", tone: "negative" },
+  replaced: { label: "Replaced", tone: "neutral" },
+  failed: { label: "Failed", tone: "negative" },
+}
+
+export function keeperTxBadge(status: NonNullable<GiwaArcoUSDKeeperReport["lastTx"]>["status"]): { label: string; tone: AlertTone } {
+  return TX_STATUS[status] ?? { label: status, tone: "neutral" }
+}
+
+/** The last transaction's what: "tUSDC · paid 3", or "distribute · $7.99". */
+export function keeperTxText(tx: NonNullable<GiwaArcoUSDKeeperReport["lastTx"]>): string {
+  if (tx.action === "distribute") return `distribute${tx.amountUsd ? ` · ${usdText(tx.amountUsd)}` : ""}`
+  return `${tx.symbol}${tx.paid !== null ? ` · paid ${tx.paid}` : ""}`
+}
+
+/** The keeper's Savings step in words: "Due in 23h · $1.2 accrued", "Distributed $7.99", "Dry run: would distribute $3", … */
+export function keeperDistributeText(distribute: GiwaArcoUSDKeeperReport["distribute"], now: number): string {
+  if (!distribute) return "Not checked this round"
+  const amount = usdText(distribute.amountUsd)
+  switch (distribute.state) {
+    case "off":
+      return "Off (ARCOUSD_KEEPER_DISTRIBUTE=off): distribute from the Savings tab"
+    case "not-deployed":
+      return "Savings is not deployed"
+    case "waiting": {
+      const at = distribute.nextAt ? Date.parse(distribute.nextAt) : Number.NaN
+      const accrued = amount === "—" ? "" : ` · ${amount} accrued`
+      return Number.isFinite(at) ? `Due in ${durationText(Math.max(0, (at - now) / 1000))}${accrued}` : `Waiting${accrued}`
+    }
+    case "nothing":
+      return "Due, nothing to distribute now (under $0.01)"
+    case "ready":
+      return `${distribute.detail ?? "Ready"}: ${amount}`
+    case "sent":
+      return distribute.detail === "Distributed" ? `Distributed ${amount}` : `${distribute.detail ?? "Sent"} (${amount})`
+    case "reverts":
+      return `distribute() would revert: ${distribute.detail ?? "no reason given"}`
+    case "error":
+      return `Could not check: ${distribute.detail ?? "unknown error"}`
+    default:
+      return distribute.detail ?? String(distribute.state)
+  }
+}
+
+/** "tUSDC would pay 3 · tUSDT nothing now · tRLUSD failed: …"; "Not checked this round" when it stopped first. */
+export function simulationText(report: Pick<GiwaArcoUSDKeeperReport, "simulations" | "simulated">): string {
+  if (report.simulated === false) return "Not checked this round"
+  const simulations = report.simulations ?? []
+  if (!simulations.length) return "No backlog to check"
+  return simulations
+    .map((item) =>
+      item.error
+        ? `${item.symbol} failed: ${item.error}`
+        : item.paid
+          ? `${item.symbol} would pay ${countText(item.paid, "request")}`
+          : item.clearing
+            ? `${item.symbol} would first step past cancelled or failed entries`
+            : `${item.symbol} nothing payable now`,
+    )
+    .join(" · ")
+}
+
+// ─────────────────────────────── Savings ───────────────────────────────
+
+/** Share price (ArcoUSD per sArcoUSD): up to 4 decimals, at least 2 (the NAV exception: near-par
+ *  prices need sub-cent precision). "—" when not a number. */
+export function sharePriceText(value: string | number | null | undefined): string {
+  const price = typeof value === "number" ? value : Number(value)
+  if (value === null || value === undefined || value === "" || !Number.isFinite(price)) return "—"
+  return price.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4 })
+}
+
+/** ArcoUSD released into the share price per day at the current rate. */
+export function rewardsPerDayUsd(state: Pick<GiwaArcoUSDSavingsState, "rewardRate">): number | null {
+  try {
+    return Number(BigInt(state.rewardRate) * 86_400n) / 1e18
+  } catch {
+    return null
+  }
+}
+
+/** Every switch Savings depends on: the vault's own (deposit, withdraw, addRewards, all), the
+ *  distributor, and the Reserve and ArcoUSD mint pauses that stop distribute(). */
+export function savingsPauseRows(state: GiwaArcoUSDSavingsState): PauseRow[] {
+  return [
+    { label: "sArcoUSD deposit", paused: state.depositPaused, effect: state.seeded ? "Deposits and mints" : "Deposits and mints (closed until the seed)" },
+    { label: "sArcoUSD withdraw", paused: state.withdrawPaused, effect: "Withdrawals and redemptions" },
+    { label: "sArcoUSD addRewards", paused: state.rewardsPaused, effect: "No yield can be added (distributions revert)" },
+    { label: "sArcoUSD (all)", paused: state.vaultPaused, effect: "Deposits, withdrawals and rewards (share transfers continue)" },
+    { label: "Distributor", paused: state.distributor.paused, effect: "distribute()" },
+    { label: "Reserve (all)", paused: state.distributor.reservePaused, effect: "distribute() refuses while the Reserve is paused" },
+    { label: "ArcoUSD mint", paused: state.distributor.arcoUSDMintPaused, effect: "distribute() cannot mint (ArcoUSD paused or mint paused)" },
+  ]
+}
+
+export type DistributionVerdict =
+  | { readonly kind: "paused"; readonly what: string }
+  | { readonly kind: "unknown"; readonly error: string }
+  | { readonly kind: "nav" }
+  | { readonly kind: "waiting"; readonly until: string }
+  | { readonly kind: "nothing"; readonly why: string }
+  | { readonly kind: "ready"; readonly amountUsd: string }
+
+/** Whether distribute() would mint now, and if not, why (the first reason that applies). Every pause
+ *  on its path makes it revert: the distributor, the Reserve, sArcoUSD (all or addRewards), ArcoUSD mint. */
+export function distributionVerdict(state: GiwaArcoUSDSavingsState, now: number): DistributionVerdict {
+  const { distributor } = state
+  if (distributor.paused) return { kind: "paused", what: "The distributor" }
+  if (distributor.reservePaused) return { kind: "paused", what: "The Reserve" }
+  if (state.vaultPaused) return { kind: "paused", what: "sArcoUSD" }
+  if (state.rewardsPaused) return { kind: "paused", what: "sArcoUSD addRewards" }
+  if (distributor.arcoUSDMintPaused) return { kind: "paused", what: "ArcoUSD mint" }
+  const preview = distributor.preview
+  if (!preview) return { kind: "unknown", error: "The distributor preview could not be read (see the API log)" }
+  if (!preview.navOk) return { kind: "nav" }
+  if (Date.parse(distributor.nextDistributionAt) > now) return { kind: "waiting", until: distributor.nextDistributionAt }
+  if (!state.seeded) return { kind: "nothing", why: "No savers yet (the vault is not seeded)" }
+  let amount = 0n
+  try {
+    amount = BigInt(preview.amount)
+  } catch {
+    return { kind: "unknown", error: "Unreadable preview amount" }
+  }
+  if (amount > 0n) return { kind: "ready", amountUsd: preview.amountUsd }
+  const zero = (value: string) => {
+    try {
+      return BigInt(value) === 0n
+    } catch {
+      return false
+    }
+  }
+  if (zero(preview.mintHeadroom)) return { kind: "nothing", why: "The Reserve mint cap is reached" }
+  if (zero(preview.surplus)) return { kind: "nothing", why: "No Reserve surplus above the margin" }
+  if (zero(preview.rateCap)) return { kind: "nothing", why: "Nothing saved long enough to earn yet" }
+  return { kind: "nothing", why: "Nothing to distribute" }
+}
+
+// ── Buffer top-up (Overview › Fund buy gate) ──────────────────────────────
+
+/** The most one top-up may deposit, in whole asset units (the server's typo guard). */
+export const TOP_UP_MAX = 1_000_000
+
+/** The Reserve assets an operator can top up (deposits on), the buy gate's asset first. */
+export function topUpAssets(reserve: GiwaArcoUSDReserve): { symbol: string; decimals: number }[] {
+  const assets = (reserve.reserve?.assets ?? []).filter((asset) => asset.depositEnabled)
+  const gateAsset = reserve.gate.asset
+  return [...assets]
+    .sort((a, b) => Number(b.symbol === gateAsset) - Number(a.symbol === gateAsset))
+    .map(({ symbol, decimals }) => ({ symbol, decimals }))
+}
+
+/** The typed amount (trimmed) when it is positive, has at most `decimals` decimals and is at most TOP_UP_MAX; else null. */
+export function topUpAmount(value: string, decimals: number): string | null {
+  const text = value.trim()
+  const match = /^(\d{1,7})(?:\.(\d+))?$/.exec(text)
+  if (!match) return null
+  const whole = Number(match[1])
+  const fraction = match[2] ?? ""
+  if (fraction.length > decimals) return null
+  const fractionNonZero = /[1-9]/.test(fraction)
+  if (whole > TOP_UP_MAX || (whole === TOP_UP_MAX && fractionNonZero)) return null
+  return whole > 0 || fractionNonZero ? text : null
+}
+
+/**
+ * What the top-up does to the buy gate, for the gate's own asset: the settleable buffer after it, as the
+ * Reserve computes it (max(0, balance + amount − queued); a swap fee stays in the balance), and one line
+ * on the gate, which also needs a threshold-sized buy left under the mint cap after the ArcoUSD minted.
+ * Null for another asset, an inactive gate or an unread reserve.
+ */
+export function gateAfterTopUp(reserve: GiwaArcoUSDReserve, symbol: string, amount: number): { availableAfter: number; verdict: string } | null {
+  const { gate } = reserve
+  const state = reserve.reserve
+  if (gate.status === "inactive" || symbol !== gate.asset || !state) return null
+  const asset = state.assets.find((item) => item.symbol === symbol)
+  if (!asset) return null
+  const availableAfter = Math.max(0, Number(asset.balanceHuman) + amount - Number(asset.queuedHuman))
+  const threshold = Number(gate.threshold)
+  const headroom = mintHeadroomUsd(state)
+  const capShort = headroom !== null && headroom - amount < threshold
+  const verdict =
+    gate.status === "open"
+      ? capShort
+        ? "Leaves less than one threshold-sized buy under the mint cap: the gate would close"
+        : "The gate is already open"
+      : gate.reason !== "insufficient-buffer"
+        ? `The gate stays closed: ${GATE_REASON[gate.reason ?? ""] ?? gate.reason ?? "see above"}`
+        : availableAfter < threshold
+          ? `Still ${usdText(threshold - availableAfter)} below the threshold`
+          : capShort
+            ? "The buffer reaches the threshold, but less than one threshold-sized buy would be left under the mint cap: the gate stays closed"
+            : "Reaches the threshold: the gate opens on the next reserve read"
+  return { availableAfter, verdict }
+}
+
+// ─────────────────────────── add surplus (Savings yield) ───────────────────────────
+
+/** Where Savings yield stands against the Reserve's surplus, in USD. */
+export type SurplusStanding = {
+  /** Backing − liabilities. */
+  readonly surplusUsd: number
+  /** The distributor's safety margin: liabilities × reserveMarginBps. Only surplus above it is paid out. */
+  readonly marginUsd: number
+  /** Surplus above the margin (0 when short of it). */
+  readonly distributableUsd: number
+  /** What is missing before anything can be paid out (0 when the margin is covered). */
+  readonly shortfallUsd: number
+  /** What one day of yield at the distributor's APR cap costs: sArcoUSD total assets × maxAprBps ÷ 365. */
+  readonly dailyAtCapUsd: number
+  /** Days the distributable surplus lasts at the cap; null when nothing is saved (no daily cost). */
+  readonly daysAtCap: number | null
+}
+
+/** What Add surplus reads of a Reserve: its totals and coins, and the coin listed first. The gold Reserve fits too. */
+export type SurplusReserve = {
+  gate: { asset: string }
+  reserve: { totalBacking: string; totalLiabilities: string; assets: readonly { symbol: string; decimals: number }[] } | null
+}
+/** What Add surplus reads of the vault and its distributor. */
+export type SurplusSavings = { totalAssets: string; distributor: { reserveMarginBps: number; maxAprBps: number } }
+
+/**
+ * The surplus picture with `addUsd` more in the Reserve (0 = as it stands). Null when a figure is unreadable.
+ * A transfer adds to the backing 1:1 and mints nothing, so liabilities and the margin stay where they are.
+ * The figures are in the Reserve's own unit: dollars for ArcoUSD, troy ounces for the gold Reserve.
+ */
+export function surplusStanding(
+  reserve: Pick<NonNullable<SurplusReserve["reserve"]>, "totalBacking" | "totalLiabilities">,
+  savings: SurplusSavings,
+  addUsd = 0,
+): SurplusStanding | null {
+  let backing: number
+  let liabilities: number
+  let saved: number
+  try {
+    backing = Number(BigInt(reserve.totalBacking)) / 1e18
+    liabilities = Number(BigInt(reserve.totalLiabilities)) / 1e18
+    saved = Number(BigInt(savings.totalAssets)) / 1e18
+  } catch {
+    return null
+  }
+  if (!Number.isFinite(addUsd) || addUsd < 0) return null
+  const surplusUsd = backing + addUsd - liabilities
+  const marginUsd = (liabilities * savings.distributor.reserveMarginBps) / 10_000
+  const distributableUsd = Math.max(surplusUsd - marginUsd, 0)
+  const dailyAtCapUsd = (saved * savings.distributor.maxAprBps) / 10_000 / 365
+  return {
+    surplusUsd,
+    marginUsd,
+    distributableUsd,
+    shortfallUsd: Math.max(marginUsd - surplusUsd, 0),
+    dailyAtCapUsd,
+    daysAtCap: dailyAtCapUsd > 0 ? distributableUsd / dailyAtCapUsd : null,
+  }
+}
+
+/**
+ * What to add so the surplus covers the margin and `days` of yield at the cap, rounded up to a whole
+ * coin; 0 when it already does.
+ */
+export function surplusToAdd(standing: SurplusStanding, days: number, roundUp: (amount: number) => number = Math.ceil): number {
+  const wanted = standing.dailyAtCapUsd * Math.max(days, 0)
+  const missing = standing.shortfallUsd + wanted - standing.distributableUsd
+  return missing > 0 ? roundUp(missing) : 0
+}
+
+/** "about 34 days" / "about 3.2 years" / "less than a day": how long the surplus lasts at the cap. */
+export function surplusRunwayText(days: number | null): string {
+  if (days === null || !Number.isFinite(days)) return "—"
+  if (days < 1) return days <= 0 ? "none" : "less than a day"
+  if (days < 730) return `about ${Math.floor(days).toLocaleString("en-US")} day${Math.floor(days) === 1 ? "" : "s"}`
+  return `about ${Number((days / 365).toFixed(1)).toLocaleString("en-US")} years`
+}
+
+/** The Reserve assets a surplus transfer can be made in (every asset the Reserve lists), base asset first. */
+export function surplusAssets(reserve: SurplusReserve): { symbol: string; decimals: number }[] {
+  const gateAsset = reserve.gate.asset
+  return [...(reserve.reserve?.assets ?? [])]
+    .sort((a, b) => Number(b.symbol === gateAsset) - Number(a.symbol === gateAsset))
+    .map(({ symbol, decimals }) => ({ symbol, decimals }))
+}

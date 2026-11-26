@@ -1,0 +1,706 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  schemas  = ["arco_evm"]
+}
+
+model EvmNetwork {
+  id                String   @id @default(cuid())
+  chainId           Int      @unique
+  name              String
+  network           String
+  publicRpcUrl      String?
+  explorerUrl       String?
+  blockscoutApiUrl  String?
+  nativeCurrency    Json?
+  latestRegistryId  String?
+  registrySyncedAt  DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@schema("arco_evm")
+}
+
+model EvmAssetDeployment {
+  id                String   @id @default(cuid())
+  chainId           Int
+  symbol            String
+  name              String
+  decimals          Int
+  tokenAddress      String
+  faucetAddress     String?
+  deploymentBlock   BigInt?
+  registryReleaseId String?
+  metadata          Json?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([chainId, symbol])
+  @@unique([chainId, tokenAddress])
+  @@schema("arco_evm")
+}
+
+model EvmProductDeployment {
+  id                       String   @id @default(cuid())
+  chainId                  Int
+  productId                String
+  symbol                   String
+  name                     String
+  productTokenAddress      String
+  paymentAssetSymbol       String
+  paymentAssetAddress      String
+  depositVaultAddress      String
+  redemptionVaultAddress   String
+  priceFeedAddress         String
+  deploymentBlock          BigInt?
+  registryReleaseId        String?
+  activationFlags          Json?
+  metadata                 Json?
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+
+  @@unique([chainId, productId])
+  @@unique([chainId, productTokenAddress])
+  @@schema("arco_evm")
+}
+
+model EvmIndexedEvent {
+  id              String   @id @default(cuid())
+  chainId         Int
+  contractAddress String
+  blockNumber     BigInt
+  blockHash       String
+  txHash          String
+  logIndex        Int
+  eventName       String
+  args            Json
+  removed         Boolean  @default(false)
+  // Block time of the event (from eth_getBlockByNumber at index time). Nullable: rows
+  // indexed before this column existed backfill via scripts/indexer/backfill-block-timestamps.
+  blockTimestamp  DateTime?
+  indexedAt       DateTime @default(now())
+
+  @@unique([chainId, txHash, logIndex])
+  @@index([chainId, contractAddress, blockNumber])
+  @@index([chainId, eventName, blockNumber])
+  @@schema("arco_evm")
+}
+
+model EvmIndexerCursor {
+  id              String   @id @default(cuid())
+  chainId         Int
+  name            String
+  fromBlock       BigInt
+  lastBlock       BigInt
+  lastBlockHash   String?
+  confirmations   Int
+  lagBlocks       Int      @default(0)
+  updatedAt       DateTime @updatedAt
+
+  @@unique([chainId, name])
+  @@schema("arco_evm")
+}
+
+model WalletAttestation {
+  id            String   @id @default(cuid())
+  walletAddress String
+  domain        String
+  statement     String?
+  signature     String
+  issuedAt      DateTime
+  expiresAt     DateTime?
+  createdAt     DateTime @default(now())
+
+  @@index([walletAddress, domain])
+  @@schema("arco_evm")
+}
+
+model AuthNonce {
+  id            String    @id @default(cuid())
+  walletAddress String
+  domain        String
+  nonce         String    @unique
+  expiresAt     DateTime
+  consumedAt    DateTime?
+  createdAt     DateTime  @default(now())
+
+  @@index([walletAddress, domain, consumedAt, expiresAt])
+  @@schema("arco_evm")
+}
+
+model IndexedRedemptionRequest {
+  id                      String    @id @default(cuid())
+  chainId                 Int
+  requestId               String
+  walletAddress           String
+  productId               String
+  productTokenAddress     String
+  redemptionVaultAddress  String
+  sharesIn                String
+  lockedAssetsOut         String
+  status                  String
+  requestedTxHash         String
+  requestedAtBlock        BigInt
+  fulfilledTxHash         String?
+  claimedTxHash           String?
+  fulfilledAt             DateTime?
+  claimedAt               DateTime?
+  // Direct-transfer payout (admin wallet -> requester): SETTLED is written here, replacing
+  // the legacy fulfill/claim path. settledTxHash is the payout ERC20 transfer tx.
+  settledAt               DateTime?
+  settledTxHash           String?
+  metadata                Json?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  @@unique([chainId, redemptionVaultAddress, requestId])
+  @@index([walletAddress, chainId, status])
+  @@schema("arco_evm")
+}
+
+// ArcoUSD Standard-queue redemptions (docs/specs/arcousd-v1.md §3), written by the ArcoUSD
+// indexer from ArcoUSDReserve events. Mirrors the on-chain request: QUEUED -> PAID |
+// PAYOUT_FAILED | CANCELLED, and PAYOUT_FAILED -> CANCELLED. PAID and CANCELLED are terminal;
+// the store only applies a transition from an allowed prior status, so re-indexing never
+// regresses a row. Amounts are base-unit integer strings (ArcoUSD 18 dec, asset native dec).
+model ArcoUSDRedeemRequest {
+  id              String    @id @default(cuid())
+  chainId         Int
+  reserveAddress  String
+  requestId       String
+  owner           String
+  recipient       String
+  asset           String
+  arcoUSDAmount   String
+  assetAmount     String
+  status          String
+  requestedAt     DateTime
+  queuedTxHash    String
+  queuedBlock     BigInt
+  paidTxHash      String?
+  paidAt          DateTime?
+  failedTxHash    String?
+  failedAt        DateTime?
+  cancelledTxHash String?
+  cancelledAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([chainId, reserveAddress, requestId])
+  @@index([owner, chainId, status])
+  // Explicit name: the default would exceed Postgres' 63-char identifier limit and drift.
+  @@index([chainId, reserveAddress, status, requestedAt], map: "ArcoUSDRedeemRequest_reserve_status_requestedAt_idx")
+  @@schema("arco_evm")
+}
+
+// Periodic ArcoUSD reserve snapshots (Lens.snapshot + pause state at one block) for the admin
+// monitoring trend and reconciliation history. `data` is the full mapped ReserveState.
+model ArcoUSDReserveSnapshot {
+  id               String   @id @default(cuid())
+  chainId          Int
+  reserveAddress   String
+  blockNumber      BigInt
+  takenAt          DateTime
+  totalBacking     String
+  totalLiabilities String
+  navOk            Boolean
+  mmfBps           Int
+  paused           Boolean
+  settlementPaused Boolean
+  data             Json
+  createdAt        DateTime @default(now())
+
+  @@unique([chainId, reserveAddress, blockNumber])
+  @@index([chainId, reserveAddress, takenAt])
+  @@schema("arco_evm")
+}
+
+// sArcoUSD (Savings) snapshots from the savings indexer (docs/specs/arcousd-v1.md §5): the share
+// price and assets over time, for the Savings APY history and the admin console.
+model ArcoUSDSavingsSnapshot {
+  id           String   @id @default(cuid())
+  chainId      Int
+  vaultAddress String
+  blockNumber  BigInt
+  takenAt      DateTime
+  totalAssets  String
+  totalSupply  String
+  // ArcoUSD per 1 sArcoUSD, base18
+  sharePrice   String
+  // rewardRate × 1 year ÷ totalAssets at the time
+  aprBps       Int
+  data         Json
+  createdAt    DateTime @default(now())
+
+  @@unique([chainId, vaultAddress, blockNumber])
+  @@index([chainId, vaultAddress, takenAt])
+  @@schema("arco_evm")
+}
+
+// ArcoUSD watcher alerts (docs/operations/arcousd-alerts.md), one row per rule key, reused across
+// occurrences: PENDING (seen, not yet held for the rule's sustain time) -> OPEN (notified) ->
+// RESOLVED (cleared). Written only by the watcher in the indexer worker; the API reads them.
+model ArcoUSDAlert {
+  id             String    @id @default(cuid())
+  chainId        Int
+  key            String
+  severity       String
+  status         String
+  title          String
+  detail         String
+  // A change re-notifies at once (e.g. which pauses are on); amounts that move stay out of it.
+  fingerprint    String
+  firstSeenAt    DateTime
+  lastSeenAt     DateTime
+  openedAt       DateTime?
+  resolvedAt     DateTime?
+  lastNotifiedAt DateTime?
+  notifyCount    Int       @default(0)
+  // Last delivery per channel: { telegram: { ok, at, error? }, slack: … }.
+  delivery       Json?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([chainId, key])
+  @@index([chainId, status])
+  @@schema("arco_evm")
+}
+
+// Liveness of the ArcoUSD background jobs ("watcher" now, the phase-3b keeper later): when each
+// last ran, last succeeded, and why it last failed.
+model ArcoUSDHeartbeat {
+  id        String    @id @default(cuid())
+  chainId   Int
+  name      String
+  lastRunAt DateTime
+  lastOkAt  DateTime?
+  lastError String?
+  data      Json?
+  updatedAt DateTime  @updatedAt
+
+  @@unique([chainId, name])
+  @@schema("arco_evm")
+}
+
+// Off-chain per-vault display/config (admin-ia-plan §2): the on-chain registry is immutable
+// deploy output, so display metadata, portfolio-card toggles, pin/hide flags and the admin
+// deposit address live here and are merged into the public catalog. No row => defaults
+// (visible, not pinned, all card views on).
+model VaultConfig {
+  id                  String   @id @default(cuid())
+  chainId             Int
+  productId           String
+  displayName         String?
+  category            String?
+  description         String?
+  adminDepositAddress String?
+  cardSnapshot        Boolean  @default(true)
+  cardIndustry        Boolean  @default(true)
+  cardExposure        Boolean  @default(true)
+  pinned              Boolean  @default(false)
+  hidden              Boolean  @default(false)
+  // Vault classification: "product" (default — shown in Products) or "saving" (shown only on the
+  // Savings page, excluded from Products). Non-null default so existing vaults stay in Products.
+  kind                String   @default("product")
+  // Display profile (P1): all nullable — null means "use the legacy fallback content".
+  // Fees are stored as integer basis points (0–10000 = 0–100%, exactly 2 decimals of
+  // percent, no float drift across the JSON boundary). Portfolio JSON columns land in P3.
+  assetManagerName        String?
+  issuerName              String?
+  about                   String?
+  aum                     String?
+  redemptionTimelineDays  Int?
+  feeInstantMintingBps    Int?
+  feeInstantRedemptionBps Int?
+  feeManagementBps        Int?
+  feePerformanceBps       Int?
+  vaultImageUrl           String?
+  assetManagerImageUrl    String?
+  issuerImageUrl          String?
+  // "More info" docs links. Each slot = a URL + a show toggle; the detail renders a link only
+  // when shown AND the URL is set (so shown defaults true but stays invisible until a URL
+  // exists). The Smart Contracts half of "More info" is derived from the registry, never stored.
+  docsUrl                 String?
+  legalUrl                String?
+  risksUrl                String?
+  docsShown               Boolean  @default(true)
+  legalShown              Boolean  @default(true)
+  risksShown              Boolean  @default(true)
+  // Portfolio breakdowns (P3): JSON arrays of { label, percent, valueUsd? }. null => the
+  // detail page falls back (Industry/Exposure → legacy; Snapshot → empty state).
+  portfolioSnapshot       Json?
+  portfolioIndustry       Json?
+  portfolioExposure       Json?
+  // Savings accept-assets (only meaningful for kind="saving"): ordered JSON array of
+  // { symbol, icon, apy, savingVaultId, isDummy }. Drives the Savings-page account selector; the
+  // accept-asset is a UI/config label, not an on-chain token. null => no accept-assets.
+  acceptAssets            Json?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@unique([chainId, productId])
+  @@schema("arco_evm")
+}
+
+// Products-page hero carousel selection (admin-managed). A small ordered collection (max 3,
+// enforced in the API) of deployed vaults to feature; identity (name + logo) is resolved
+// config-first from VaultConfig at render time, so only the card-scoped intro + show/hide +
+// order live here. `shown=false` on create => a newly added card starts hidden.
+model FeaturedCard {
+  id        String   @id @default(cuid())
+  chainId   Int
+  productId String
+  about     String?
+  shown     Boolean  @default(false)
+  position  Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([chainId, productId])
+  @@index([chainId, position])
+  @@schema("arco_evm")
+}
+
+// Isolated Stocks testnet domain. SQL migration adds integral-amount, immutable fact,
+// version and balanced journal-pair protections; runtime uses parameterized pg queries.
+model StocksQuote {
+  order StocksOrder?
+  id               String @id
+  actorId          String
+  wallet           String
+  symbol           String
+  quantity         Decimal @db.Decimal
+  cashAmount       Decimal @db.Decimal
+  deploymentDigest String
+  expiresAt        DateTime @db.Timestamptz
+  createdAt        DateTime @default(now()) @db.Timestamptz
+  @@schema("arco_evm")
+}
+model StocksOrder {
+  quote StocksQuote @relation(fields: [quoteId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  funding StocksFunding[]
+  operations StocksOutbox[]
+  holding StocksHolding?
+  id               String @id
+  orderKey         String @unique
+  quoteId          String @unique
+  actorId          String
+  wallet           String
+  symbol           String
+  quantity         Decimal @db.Decimal
+  cashAmount       Decimal @db.Decimal
+  idempotencyKey   String
+  deploymentId     String
+  deploymentDigest String
+  quoteExpiresAt   DateTime @db.Timestamptz
+  state            String @default("AWAITING_FUNDING")
+  version          Int @default(0)
+  createdAt        DateTime @default(now()) @db.Timestamptz
+  updatedAt        DateTime @default(now()) @db.Timestamptz
+  @@unique([actorId, idempotencyKey])
+  @@index([actorId, deploymentDigest, createdAt], map: "StocksOrder_actor")
+  @@schema("arco_evm")
+}
+model StocksFunding {
+  order StocksOrder? @relation(fields: [orderId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  id               String @id
+  orderId          String?
+  payer            String
+  amount           Decimal @db.Decimal
+  status           String
+  reason           String
+  txHash           String
+  proof            Json
+  deploymentDigest String
+  createdAt        DateTime @default(now()) @db.Timestamptz
+  @@schema("arco_evm")
+}
+model StocksOutbox {
+  sellOrderId String?
+  sellOrder StocksSellOrder? @relation(fields: [sellOrderId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  order StocksOrder? @relation(fields: [orderId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  id               String @id
+  orderId          String?
+  kind             String
+  payload          Json
+  deploymentDigest String
+  status           String @default("PENDING")
+  txHash           String?
+  leaseId          String?
+  leaseUntil       DateTime? @db.Timestamptz
+  nextAttemptAt    DateTime @default(now()) @db.Timestamptz
+  createdAt        DateTime @default(now()) @db.Timestamptz
+  @@index([deploymentDigest, status, nextAttemptAt], map: "StocksOutbox_dispatch")
+  @@schema("arco_evm")
+}
+model StocksJournal {
+  id               String @id
+  asset            String
+  debit            String
+  credit           String
+  amount           Decimal @db.Decimal
+  deploymentDigest String
+  blockNumber      Decimal? @db.Decimal
+  createdAt        DateTime @default(now()) @db.Timestamptz
+  @@schema("arco_evm")
+}
+model StocksHolding {
+  order StocksOrder @relation(fields: [orderId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  orderId          String @id
+  actorId          String
+  wallet           String
+  symbol           String
+  quantity         Decimal @db.Decimal
+  deploymentId     String
+  deploymentDigest String
+  txHash           String
+  blockHash        String
+  blockNumber      Decimal @db.Decimal
+  createdAt        DateTime @default(now()) @db.Timestamptz
+  @@schema("arco_evm")
+}
+model StocksAudit {
+  id               String @id
+  subject          String
+  action           String
+  detail           Json
+  deploymentDigest String
+  createdAt        DateTime @default(now()) @db.Timestamptz
+  @@schema("arco_evm")
+}
+model StocksProviderReceipt {
+  id               String @id
+  deploymentDigest String
+  requestDigest    String
+  result           Json
+  createdAt        DateTime @default(now()) @db.Timestamptz
+  @@schema("arco_evm")
+}
+
+model StocksSellQuote {
+ id String @id
+ actorId String
+ wallet String
+ symbol String
+ quantity Decimal @db.Decimal
+ cashAmount Decimal @db.Decimal
+ deploymentDigest String
+ expiresAt DateTime @db.Timestamptz
+ createdAt DateTime @default(now()) @db.Timestamptz
+ order StocksSellOrder?
+ @@schema("arco_evm")
+}
+model StocksSellOrder {
+ id String @id
+ orderKey String @unique
+ quoteId String @unique
+ quote StocksSellQuote @relation(fields: [quoteId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+ actorId String
+ wallet String
+ symbol String
+ quantity Decimal @db.Decimal
+ cashAmount Decimal @db.Decimal
+ idempotencyKey String
+ deploymentId String
+ deploymentDigest String
+ quoteExpiresAt DateTime @db.Timestamptz
+ state String @default("AWAITING_ESCROW")
+ version Int @default(0)
+ createdAt DateTime @default(now()) @db.Timestamptz
+ updatedAt DateTime @default(now()) @db.Timestamptz
+ quantityReservation StocksQuantityReservation?
+ cashReservation StocksCashReservation?
+ custody StocksCustody[]
+ operations StocksOutbox[]
+ @@unique([actorId,idempotencyKey])
+ @@index([deploymentDigest,actorId,createdAt],map:"StocksSellOrder_actor")
+ @@schema("arco_evm")
+}
+model StocksQuantityReservation {
+ orderId String @id
+ order StocksSellOrder @relation(fields: [orderId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+ deploymentDigest String
+ wallet String
+ quantity Decimal @db.Decimal
+ status String
+ createdAt DateTime @default(now()) @db.Timestamptz
+ @@schema("arco_evm")
+}
+model StocksCustody {
+ id String @id
+ escrowId String
+ orderId String?
+ order StocksSellOrder? @relation(fields: [orderId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+ deploymentDigest String
+ payer String
+ quantity Decimal @db.Decimal
+ reason String
+ status String
+ txHash String
+ proof Json
+ createdAt DateTime @default(now()) @db.Timestamptz
+ movements StocksQuantityMovement[]
+ @@unique([deploymentDigest,escrowId])
+ @@schema("arco_evm")
+}
+model StocksQuantityMovement {
+ id String @id
+ deploymentDigest String
+ wallet String
+ custodyId String?
+ custody StocksCustody? @relation(fields: [custodyId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+ walletDelta Decimal @db.Decimal
+ escrowDelta Decimal @db.Decimal
+ supplyDelta Decimal @db.Decimal
+ blockNumber Decimal @db.Decimal
+ blockHash String
+ txHash String
+ createdAt DateTime @default(now()) @db.Timestamptz
+ @@schema("arco_evm")
+}
+model StocksCashReservation {
+ orderId String @id
+ order StocksSellOrder @relation(fields: [orderId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+ deploymentDigest String
+ scopeKey String
+ amount Decimal @db.Decimal
+ status String
+ proof Json
+ createdAt DateTime @default(now()) @db.Timestamptz
+ @@schema("arco_evm")
+}
+model StocksObserverCursor {
+ deploymentDigest String @id
+ blockNumber Decimal @db.Decimal
+ blockHash String
+ version Int @default(0)
+ updatedAt DateTime @default(now()) @db.Timestamptz
+ @@schema("arco_evm")
+}
+
+model StocksLiquidityBinding {
+ scopeKey String @id
+ deploymentDigest String @unique
+ createdAt DateTime @default(now()) @db.Timestamptz
+ @@schema("arco_evm")
+}
+
+// Enrolled only atomically with newly created orders; no historical backfill.
+model StocksWalletSubmissionEnrollment {
+  submissions StocksWalletSubmission[]
+  side             String
+  orderId          String
+  intentKey        String @unique
+  actorId          String
+  wallet           String
+  deploymentDigest String
+  orderBinding     String
+  createdAt        DateTime @default(now()) @db.Timestamptz
+  @@id([side, orderId])
+  @@schema("arco_evm")
+}
+model StocksWalletSubmission {
+  receiptProof StocksWalletSubmissionProof?
+  enrollment StocksWalletSubmissionEnrollment @relation(fields: [side, orderId], references: [side, orderId], onDelete: Restrict, onUpdate: Restrict)
+  claimId           String @id
+  intentKey         String
+  stage             String
+  transactionDigest String
+  transaction       Json
+  actorId           String
+  wallet            String
+  side              String
+  orderId           String
+  deploymentDigest  String
+  status            String
+  txHash            String?
+  createdAt         DateTime @default(now()) @db.Timestamptz
+  updatedAt         DateTime @default(now()) @db.Timestamptz
+  @@unique([intentKey, stage])
+  @@schema("arco_evm")
+}
+
+model StocksWalletSubmissionProof {
+  submission StocksWalletSubmission @relation(fields: [claimId], references: [claimId], onDelete: Restrict, onUpdate: Restrict)
+  claimId String @id
+  intentKey String
+  transactionDigest String
+  deploymentDigest String
+  txHash String
+  status String
+  blockNumber Decimal @db.Decimal
+  blockHash String
+  proofDigest String
+  evidence Json
+  createdAt DateTime @default(now()) @db.Timestamptz
+  @@schema("arco_evm")
+}
+
+model StocksTradingControl {
+  deploymentDigest String @id
+  paused Boolean @default(true)
+  version Int @default(0)
+  updatedAt DateTime? @db.Timestamptz
+  operatorId String?
+  reason String?
+  events StocksTradingControlEvent[]
+  @@schema("arco_evm")
+}
+
+model StocksTradingControlEvent {
+  id String @id
+  deploymentDigest String
+  control StocksTradingControl @relation(fields: [deploymentDigest], references: [deploymentDigest], onDelete: Restrict, onUpdate: Restrict)
+  version Int
+  expectedVersion Int
+  previousPaused Boolean
+  paused Boolean
+  operatorId String
+  reason String
+  idempotencyKey String
+  createdAt DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz
+  @@unique([deploymentDigest, version])
+  @@unique([deploymentDigest, idempotencyKey])
+  @@schema("arco_evm")
+}
+
+// Per-symbol, per-side Stocks trading limits (STOCKS_TRADING_LIMITS=1). A missing row, like the version-0 row,
+// means enabled with no daily cap. dailyCashLimit is cash token base units per KST day; null means no cap.
+model StocksTradingLimit {
+  deploymentDigest String
+  symbol String
+  side String
+  enabled Boolean @default(true)
+  dailyCashLimit Decimal? @db.Decimal
+  version Int @default(0)
+  updatedAt DateTime? @db.Timestamptz
+  operatorId String?
+  reason String?
+  events StocksTradingLimitEvent[]
+  @@id([deploymentDigest, symbol, side])
+  @@schema("arco_evm")
+}
+
+model StocksTradingLimitEvent {
+  id String @id
+  deploymentDigest String
+  symbol String
+  side String
+  limit StocksTradingLimit @relation(fields: [deploymentDigest, symbol, side], references: [deploymentDigest, symbol, side], onDelete: Restrict, onUpdate: Restrict)
+  version Int
+  expectedVersion Int
+  previousEnabled Boolean
+  previousDailyCashLimit Decimal? @db.Decimal
+  enabled Boolean
+  dailyCashLimit Decimal? @db.Decimal
+  operatorId String
+  reason String
+  idempotencyKey String
+  createdAt DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz
+  @@unique([deploymentDigest, symbol, side, version])
+  @@unique([deploymentDigest, idempotencyKey])
+  @@schema("arco_evm")
+}

@@ -1,0 +1,677 @@
+import {
+  createPublicClient,
+  createWalletClient,
+  custom,
+  encodeFunctionData,
+  erc20Abi,
+  formatUnits,
+  http,
+  keccak256,
+  parseAbi,
+  parseEventLogs,
+  parseUnits,
+  toBytes,
+  type Abi,
+  type Hex,
+  type Log,
+  type WalletClient,
+} from "viem"
+import { GIWA_PUBLIC_RPC, giwaSepolia } from "./config"
+import { vaultAddressForOperation, type ProductOperation } from "./operation-routing"
+import type { GiwaCatalogItem, HexAddress, UnsignedAdminTransaction } from "./types"
+import type { ActiveWalletSource } from "./stocks-wallet-source/types"
+
+const faucetAbi = parseAbi(["function drip(address token)"])
+const faucetWithDripAllAbi = parseAbi(["function drip(address token)", "function dripAll()"])
+const productTokenAbi = parseAbi(["function greenlistEnforced() view returns (bool)"])
+const priceFeedReadAbi = parseAbi([
+  "function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)",
+  "function healthyDiff() view returns (uint256)",
+  "function minExpectedAnswer() view returns (uint256)",
+  "function maxExpectedAnswer() view returns (uint256)",
+  "function maxDeviationBps() view returns (uint256)",
+  "function decimals() view returns (uint8)",
+])
+const depositVaultAbi = parseAbi([
+  "function deposit(uint256 paymentAssets, uint256 minSharesOut, address recipient) returns (uint256)",
+  "function requestDeposit(uint256 paymentAssets, uint256 minSharesOut, address recipient) returns (uint256)",
+])
+// ArcoRouter (docs/specs/arcousd-v1.md §3.12): a fund buy paid in any Reserve stablecoin or ArcoUSD.
+const arcoRouterAbi = parseAbi([
+  "function buy(address payAsset, uint256 payAmount, address depositVault, uint256 minSharesOut, address recipient, bool request) returns (uint256 result)",
+])
+const redemptionVaultAbi = parseAbi([
+  "function redeemInstant(uint256 sharesIn, uint256 minAssetsOut, address recipient) returns (uint256)",
+  "function requestRedeem(uint256 sharesIn, uint256 minAssetsOut, address recipient) returns (uint256)",
+  "function claimRedeem(uint256 requestId)",
+])
+
+// Testnet-only zero slippage floor for GIWA preprod. Before any mainnet reuse,
+// minSharesOut/minAssetsOut must be made user-configurable and non-zero by default.
+const TESTNET_ZERO_SLIPPAGE_FLOOR = 0n
+
+const accessControlAbi = parseAbi(["function hasRole(bytes32 role, address account) view returns (bool)"])
+
+/** AccessControl role ids the admin screens check before a wallet signs (keccak256 of the role name). */
+export const ADMIN_ROLE_IDS = {
+  FEED_ADMIN_ROLE: keccak256(toBytes("FEED_ADMIN_ROLE")),
+  PAUSER_ROLE: keccak256(toBytes("PAUSER_ROLE")),
+  DEPOSIT_VAULT_ADMIN_ROLE: keccak256(toBytes("DEPOSIT_VAULT_ADMIN_ROLE")),
+  REDEMPTION_VAULT_ADMIN_ROLE: keccak256(toBytes("REDEMPTION_VAULT_ADMIN_ROLE")),
+} as const
+export type AdminRoleName = keyof typeof ADMIN_ROLE_IDS
+
+export const publicGiwaClient = createPublicClient({
+  chain: giwaSepolia,
+  transport: http(GIWA_PUBLIC_RPC),
+})
+
+export function toBaseUnits(value: string, decimals: number) {
+  const normalized = value.trim() || "0"
+  return parseUnits(normalized, decimals)
+}
+
+export function fromBaseUnits(value: bigint, decimals: number) {
+  return formatUnits(value, decimals)
+}
+
+type ActiveWalletClient = Pick<WalletClient, "sendTransaction" | "writeContract"> &
+  Partial<Pick<WalletClient, "getAddresses" | "getChainId" | "signMessage">>
+type SimulateContractClient = {
+  simulateContract(args: Record<string, unknown>): Promise<{ request: unknown }>
+}
+type ContractWriter = {
+  writeContract(request: unknown): Promise<Hex>
+}
+
+type DynamicRawProvider = Extract<ActiveWalletSource, { mode: "dynamic" }>["rawProvider"]
+let walletSource: { mode: "injected" } | { mode: "dynamic"; client: ActiveWalletClient | null; rawProvider?: DynamicRawProvider; readRawProvider?: () => DynamicRawProvider } = { mode: "injected" }
+
+export function setInjectedWalletSource() {
+  walletSource = { mode: "injected" }
+}
+
+export function setDynamicWalletClient(client: ActiveWalletClient | null, rawProvider?: DynamicRawProvider, readRawProvider?: () => DynamicRawProvider) {
+  walletSource = { mode: "dynamic", client, ...(client && rawProvider ? { rawProvider, readRawProvider } : {}) }
+}
+
+/** Read-only view of the active source object. It creates no client and issues no request. */
+export function activeWalletSource(): ActiveWalletSource {
+  if (walletSource.mode === "dynamic") {
+    const { client, rawProvider, readRawProvider } = walletSource
+    if (!rawProvider) return { mode: "dynamic", client }
+    try { return { mode: "dynamic", client, rawProvider: readRawProvider ? readRawProvider() : rawProvider } }
+    catch { return { mode: "dynamic", client, rawProvider: null } }
+  }
+  return { mode: "injected", provider: typeof window === "undefined" ? null : window.ethereum ?? null }
+}
+
+function browserProvider() {
+  if (!window.ethereum) throw new Error("Injected wallet not found")
+  return window.ethereum
+}
+
+export function walletClient() {
+  if (walletSource.mode === "dynamic") {
+    if (!walletSource.client) {
+      throw new Error("Dynamic wallet client is unavailable. Connect and switch to GIWA Sepolia.")
+    }
+    return walletSource.client
+  }
+  return createWalletClient({
+    chain: giwaSepolia,
+    transport: custom(browserProvider()),
+  })
+}
+
+type ReceiptClient = {
+  waitForTransactionReceipt(args: { hash: Hex }): Promise<{ status: string; logs?: readonly Log[]; blockNumber?: bigint }>
+}
+
+type EstimateGasClient = {
+  estimateGas(args: { account: HexAddress; to: HexAddress; data: Hex; value: bigint }): Promise<bigint>
+}
+
+type PreparedWalletClient = {
+  sendTransaction(args: {
+    account: HexAddress
+    chain: typeof giwaSepolia
+    to: HexAddress
+    data: Hex
+    value: bigint
+  }): Promise<Hex>
+}
+
+export function readableError(err: unknown) {
+  const shortMessage = typeof err === "object" && err && "shortMessage" in err ? String(err.shortMessage) : null
+  return shortMessage ?? (err instanceof Error ? err.message : String(err))
+}
+
+function isMissingFunctionError(err: unknown) {
+  return /selector|function.*not|no data|does not exist|unknown function|decode/i.test(readableError(err))
+}
+
+function preparedTransactionValue(tx: UnsignedAdminTransaction) {
+  return tx.value === "0x0" ? 0n : BigInt(tx.value)
+}
+
+// "simulated": the server already ran the call (eth_call) and it would succeed (ArcoUSD processQueue).
+// "failed" (or anything else) stops the send before the wallet is asked.
+function assertBackendSimulationHint(tx: UnsignedAdminTransaction) {
+  const status = tx.simulation?.status?.toLowerCase()
+  if (!status || status === "success" || status === "ok" || status === "simulated" || status === "not-run" || status === "skipped") return
+  throw new Error(tx.simulation?.reason ? `Backend simulation failed: ${tx.simulation.reason}` : "Backend simulation failed")
+}
+
+export async function waitForSuccessfulReceipt(hash: Hex, client: ReceiptClient = publicGiwaClient as ReceiptClient) {
+  const receipt = await client.waitForTransactionReceipt({ hash })
+  if (receipt.status !== "success") throw new Error("Transaction reverted before confirmation")
+  return receipt
+}
+
+/**
+ * How much of `token` reached `recipient` in a confirmed transaction: the sum of its ERC-20 Transfer logs to them, as a
+ * decimal string at `decimals`. Null when the receipt holds no such log (or no logs at all).
+ */
+export function receivedTokenAmount(
+  receipt: { logs?: readonly Log[] } | null | undefined,
+  token: HexAddress | null | undefined,
+  recipient: HexAddress,
+  decimals: number,
+): string | null {
+  if (!receipt?.logs || !token) return null
+  let total = 0n
+  for (const log of parseEventLogs({ abi: erc20Abi, eventName: "Transfer", logs: [...receipt.logs] })) {
+    if (log.address.toLowerCase() !== token.toLowerCase()) continue
+    if (log.args.to.toLowerCase() !== recipient.toLowerCase()) continue
+    total += log.args.value
+  }
+  return total > 0n ? formatUnits(total, decimals) : null
+}
+
+export async function afterConfirmedReceipt(
+  hash: Hex,
+  refreshReads: () => Promise<unknown> | unknown,
+  client: ReceiptClient = publicGiwaClient as ReceiptClient,
+) {
+  const receipt = await waitForSuccessfulReceipt(hash, client)
+  await refreshReads()
+  return receipt
+}
+
+export async function estimatePreparedTransaction(
+  account: HexAddress,
+  tx: UnsignedAdminTransaction,
+  client: EstimateGasClient = publicGiwaClient as EstimateGasClient,
+) {
+  assertBackendSimulationHint(tx)
+  try {
+    await client.estimateGas({
+      account,
+      to: tx.to,
+      data: tx.data,
+      value: preparedTransactionValue(tx),
+    })
+  } catch (err) {
+    throw new Error(`Transaction simulation failed: ${readableError(err)}`)
+  }
+}
+
+export async function sendPreparedTransactionWithClients(
+  account: HexAddress,
+  tx: UnsignedAdminTransaction,
+  clients: { publicClient?: EstimateGasClient; wallet?: PreparedWalletClient } = {},
+) {
+  await estimatePreparedTransaction(account, tx, clients.publicClient ?? (publicGiwaClient as EstimateGasClient))
+  const client = clients.wallet ?? (walletClient() as PreparedWalletClient)
+  return client.sendTransaction({
+    account,
+    chain: giwaSepolia,
+    to: tx.to,
+    data: tx.data,
+    value: preparedTransactionValue(tx),
+  })
+}
+
+export async function sendPreparedTransaction(account: HexAddress, tx: UnsignedAdminTransaction) {
+  return sendPreparedTransactionWithClients(account, tx)
+}
+
+export async function simulateAndWriteWithClients(args: {
+  account: HexAddress
+  address: HexAddress
+  abi: Abi
+  functionName: string
+  args: readonly unknown[]
+}, clients: { publicClient?: SimulateContractClient; wallet?: ContractWriter } = {}) {
+  const simulation = await (clients.publicClient ?? (publicGiwaClient as unknown as SimulateContractClient)).simulateContract({
+    account: args.account,
+    address: args.address,
+    abi: args.abi,
+    functionName: args.functionName,
+    args: [...args.args],
+  })
+  return (clients.wallet ?? (walletClient() as unknown as ContractWriter)).writeContract(simulation.request)
+}
+
+async function simulateAndWrite(args: {
+  account: HexAddress
+  address: HexAddress
+  abi: Abi
+  functionName: string
+  args: readonly unknown[]
+}) {
+  return simulateAndWriteWithClients(args)
+}
+
+// `blockNumber` pins the read to that block (see readAtConfirmedBlock); omitted reads the latest.
+export async function readTokenBalance(token: HexAddress, account: HexAddress, decimals: number, blockNumber?: bigint) {
+  const balance = await publicGiwaClient.readContract({
+    address: token,
+    abi: erc20Abi,
+    functionName: "balanceOf",
+    args: [account],
+    ...(blockNumber === undefined ? {} : { blockNumber }),
+  })
+  return fromBaseUnits(balance, decimals)
+}
+
+/**
+ * A read as of the block a transaction confirmed in. The public RPC is several nodes: right after a
+ * receipt, a "latest" read can be answered by one that has not seen the block yet and return the
+ * pre-transaction value, which then sits on screen. Pinned to the block, such a node cannot answer
+ * (it fails), so the read is retried until a node that has the block replies. Null when none does
+ * in time; the caller falls back to its ordinary refresh.
+ */
+export async function readAtConfirmedBlock<T>(
+  read: (blockNumber: bigint) => Promise<T>,
+  blockNumber: bigint,
+  options: { tries?: number; delayMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<T | null> {
+  const { tries = 10, delayMs = 400, sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)) } = options
+  for (let attempt = 0; attempt < tries; attempt += 1) {
+    try {
+      return await read(blockNumber)
+    } catch {
+      if (attempt < tries - 1) await sleep(delayMs)
+    }
+  }
+  return null
+}
+
+export async function readGreenlistEnforced(productToken: HexAddress) {
+  try {
+    return await publicGiwaClient.readContract({
+      address: productToken,
+      abi: productTokenAbi,
+      functionName: "greenlistEnforced",
+    })
+  } catch (err) {
+    if (isMissingFunctionError(err)) return false
+    throw err
+  }
+}
+
+export type PriceFeedState = {
+  answer: bigint
+  updatedAt: bigint
+  roundId: bigint
+  healthyDiff: bigint
+  min: bigint
+  max: bigint
+  maxDeviationBps: bigint
+  decimals: number
+}
+
+// Reads the on-chain ProductPriceFeed via the public RPC. Uses parallel readContract
+// calls (not multicall) so it does not depend on a Multicall3 deployment on GIWA Sepolia.
+export async function readPriceFeedState(priceFeed: HexAddress): Promise<PriceFeedState> {
+  const base = { address: priceFeed, abi: priceFeedReadAbi } as const
+  const [latestRoundData, healthyDiff, min, max, maxDeviationBps, decimals] = await Promise.all([
+    publicGiwaClient.readContract({ ...base, functionName: "latestRoundData" }),
+    publicGiwaClient.readContract({ ...base, functionName: "healthyDiff" }),
+    publicGiwaClient.readContract({ ...base, functionName: "minExpectedAnswer" }),
+    publicGiwaClient.readContract({ ...base, functionName: "maxExpectedAnswer" }),
+    publicGiwaClient.readContract({ ...base, functionName: "maxDeviationBps" }),
+    publicGiwaClient.readContract({ ...base, functionName: "decimals" }),
+  ])
+  const [roundId, answer, , updatedAt] = latestRoundData as readonly [bigint, bigint, bigint, bigint, bigint]
+  return {
+    answer,
+    updatedAt,
+    roundId,
+    healthyDiff: healthyDiff as bigint,
+    min: min as bigint,
+    max: max as bigint,
+    maxDeviationBps: maxDeviationBps as bigint,
+    decimals: Number(decimals),
+  }
+}
+
+/** Read-only: whether `account` holds `role` on an AccessControl contract (price feed, vault). */
+export async function readHasRole(contract: HexAddress, role: AdminRoleName, account: HexAddress): Promise<boolean> {
+  return (await publicGiwaClient.readContract({
+    address: contract,
+    abi: accessControlAbi,
+    functionName: "hasRole",
+    args: [ADMIN_ROLE_IDS[role], account],
+  })) as boolean
+}
+
+// Reads productToken.totalSupply()/decimals() so the panel can derive human shares
+// outstanding (totalSupply / 10**decimals) for NAV-per-share pricing.
+export async function readShareSupply(productToken: HexAddress): Promise<{ supply: bigint; decimals: number }> {
+  const [supply, decimals] = await Promise.all([
+    publicGiwaClient.readContract({ address: productToken, abi: erc20Abi, functionName: "totalSupply" }),
+    publicGiwaClient.readContract({ address: productToken, abi: erc20Abi, functionName: "decimals" }),
+  ])
+  return { supply: supply as bigint, decimals: Number(decimals) }
+}
+
+export async function readAllowance(token: HexAddress, owner: HexAddress, spender: HexAddress, decimals: number) {
+  const allowance = await publicGiwaClient.readContract({
+    address: token,
+    abi: erc20Abi,
+    functionName: "allowance",
+    args: [owner, spender],
+  })
+  return {
+    raw: allowance,
+    display: fromBaseUnits(allowance, decimals),
+  }
+}
+
+export async function approveVault(args: {
+  account: HexAddress
+  token: HexAddress
+  vault: HexAddress
+  amount: bigint
+}) {
+  return simulateAndWrite({
+    account: args.account,
+    address: args.token,
+    abi: erc20Abi,
+    functionName: "approve",
+    args: [args.vault, args.amount],
+  })
+}
+
+export async function dripTestAsset(args: { account: HexAddress; faucet: HexAddress; token: HexAddress }) {
+  return simulateAndWrite({
+    account: args.account,
+    address: args.faucet,
+    abi: faucetAbi,
+    functionName: "drip",
+    args: [args.token],
+  })
+}
+
+export type FaucetDripAllResult =
+  | { mode: "dripAll"; hashes: Hex[]; fallbackReason?: undefined }
+  | { mode: "perAssetFallback"; hashes: Hex[]; fallbackReason: string }
+
+export async function dripAllTestAssetsWithClients(
+  args: { account: HexAddress; faucet: HexAddress; tokens: readonly HexAddress[] },
+  clients: { publicClient?: SimulateContractClient; wallet?: ContractWriter } = {},
+): Promise<FaucetDripAllResult> {
+  try {
+    const hash = await simulateAndWriteWithClients(
+      {
+        account: args.account,
+        address: args.faucet,
+        abi: faucetWithDripAllAbi,
+        functionName: "dripAll",
+        args: [],
+      },
+      clients,
+    )
+    return { mode: "dripAll", hashes: [hash] }
+  } catch (err) {
+    if (!isMissingFunctionError(err)) {
+      throw err
+    }
+    if (args.tokens.length === 0) {
+      throw new Error(`Faucet dripAll is unavailable and no configured assets were provided: ${readableError(err)}`)
+    }
+    const hashes: Hex[] = []
+    for (const token of args.tokens) {
+      hashes.push(
+        await simulateAndWriteWithClients(
+          {
+            account: args.account,
+            address: args.faucet,
+            abi: faucetAbi,
+            functionName: "drip",
+            args: [token],
+          },
+          clients,
+        ),
+      )
+    }
+    return {
+      mode: "perAssetFallback",
+      hashes,
+      fallbackReason: readableError(err),
+    }
+  }
+}
+
+export async function dripAllTestAssets(args: { account: HexAddress; faucet: HexAddress; tokens: readonly HexAddress[] }) {
+  return dripAllTestAssetsWithClients(args)
+}
+
+export function encodedOperationCall(
+  product: GiwaCatalogItem,
+  operation: ProductOperation,
+  amount: bigint,
+  recipient: HexAddress,
+  requestId?: bigint,
+): { to: HexAddress | null; data: Hex; requiresApproval: boolean } {
+  const to = vaultAddressForOperation(product, operation)
+  if (!to) return { to: null, data: "0x", requiresApproval: false }
+
+  if (operation === "claimRedeem") {
+    return {
+      to,
+      data: encodeFunctionData({ abi: redemptionVaultAbi, functionName: "claimRedeem", args: [requestId ?? 0n] }),
+      requiresApproval: false,
+    }
+  }
+
+  if (operation === "deposit" || operation === "requestDeposit") {
+    return {
+      to,
+      data: encodeFunctionData({
+        abi: depositVaultAbi,
+        functionName: operation,
+        args: [amount, TESTNET_ZERO_SLIPPAGE_FLOOR, recipient],
+      }),
+      requiresApproval: true,
+    }
+  }
+
+  return {
+    to,
+    data: encodeFunctionData({
+      abi: redemptionVaultAbi,
+      functionName: operation,
+      args: [amount, TESTNET_ZERO_SLIPPAGE_FLOOR, recipient],
+    }),
+    requiresApproval: false,
+  }
+}
+
+export async function submitProductOperation(args: {
+  account: HexAddress
+  product: GiwaCatalogItem
+  operation: ProductOperation
+  amount: bigint
+  requestId?: bigint
+}) {
+  const to = vaultAddressForOperation(args.product, args.operation)
+  if (!to) throw new Error("Vault address is missing from the registry")
+  if (args.operation === "claimRedeem") {
+    return simulateAndWrite({
+      account: args.account,
+      address: to,
+      abi: redemptionVaultAbi,
+      functionName: "claimRedeem",
+      args: [args.requestId ?? 0n],
+    })
+  }
+  if (args.operation === "deposit" || args.operation === "requestDeposit") {
+    return simulateAndWrite({
+      account: args.account,
+      address: to,
+      abi: depositVaultAbi,
+      functionName: args.operation,
+      args: [args.amount, TESTNET_ZERO_SLIPPAGE_FLOOR, args.account],
+    })
+  }
+  return simulateAndWrite({
+    account: args.account,
+    address: to,
+    abi: redemptionVaultAbi,
+    functionName: args.operation,
+    args: [args.amount, TESTNET_ZERO_SLIPPAGE_FLOOR, args.account],
+  })
+}
+
+/**
+ * Buy `depositVault`'s product through the ArcoRouter with `amount` of `payAsset` (the Router must
+ * hold the allowance). `request` files a deposit request instead of an instant deposit. Shares go
+ * to the buyer. Same testnet zero slippage floor as the direct vault deposit.
+ */
+export async function submitRouterBuy(args: {
+  account: HexAddress
+  router: HexAddress
+  payAsset: HexAddress
+  amount: bigint
+  depositVault: HexAddress
+  request: boolean
+}) {
+  return simulateAndWrite({
+    account: args.account,
+    address: args.router,
+    abi: arcoRouterAbi,
+    functionName: "buy",
+    args: [args.payAsset, args.amount, args.depositVault, TESTNET_ZERO_SLIPPAGE_FLOOR, args.account, args.request],
+  })
+}
+
+/** Calldata of submitRouterBuy (tests and transaction previews). */
+export function encodedRouterBuy(args: { payAsset: HexAddress; amount: bigint; depositVault: HexAddress; recipient: HexAddress; request: boolean }): Hex {
+  return encodeFunctionData({
+    abi: arcoRouterAbi,
+    functionName: "buy",
+    args: [args.payAsset, args.amount, args.depositVault, TESTNET_ZERO_SLIPPAGE_FLOOR, args.recipient, args.request],
+  })
+}
+
+// ArcoUSD v1 (docs/specs/arcousd-v1.md §3.2, §3.15): Get ArcoUSD on the Reserve, the sArcoUSD account through the Zap.
+// With their custom errors, so a revert reads as its name (InsufficientLiquidity, DepositDisabled…) instead of a selector.
+// The Zap passes the Reserve's and sArcoUSD's errors through.
+const ARCOUSD_RESERVE_ERRORS = [
+  "error BelowQueueMinimum()",
+  "error Blacklisted()",
+  "error BufferFloor()",
+  "error Depeg()",
+  "error DepositCap()",
+  "error DepositDisabled()",
+  "error InsufficientLiquidity()",
+  "error MinOut()",
+  "error MintCap()",
+  "error NavUnavailable()",
+  "error RedeemDisabled()",
+  "error UnsupportedAsset()",
+  "error ZeroAddress()",
+  "error ZeroAmount()",
+] as const
+const arcoUSDReserveAbi = parseAbi([
+  "function deposit(address asset, uint256 amount, address recipient) returns (uint256 arcoUSDOut)",
+  "function redeemInstantOnly(address asset, uint256 arcoUSDAmount, address recipient, uint256 minAssetOut) returns (uint256 assetPaid)",
+  ...ARCOUSD_RESERVE_ERRORS,
+])
+const arcoSavingsZapAbi = parseAbi([
+  "function deposit(address asset, uint256 amount, uint256 minShares, address receiver) returns (uint256 shares)",
+  "function redeem(uint256 shares, address asset, uint256 minAssetOut, address receiver) returns (uint256 assetOut)",
+  ...ARCOUSD_RESERVE_ERRORS,
+  "error InvalidRecipient()",
+  "error NotReserveAsset()",
+  "error NoDepositors()",
+  "error MinSharesViolation()",
+])
+
+/** ArcoSavingsZap.quoteRedeem: what `shares` pay in `asset` now, and whether redeem() would go through Instant. */
+const arcoSavingsZapQuoteAbi = parseAbi([
+  "function quoteRedeem(uint256 shares, address asset) view returns (uint256 arcoUSDOut, uint256 assetOut, bool instant)",
+  "error NotReserveAsset()",
+])
+
+/**
+ * Whether a Zap would pay `shares` out in `asset` at once (quoteRedeem's `instant`: the vault and the Reserve's redeem
+ * switches open, the coin redeemable and enough of it in the Reserve's free buffer), with the coin it would pay.
+ */
+export async function readZapRedeemQuote(zap: HexAddress, shares: bigint, asset: HexAddress) {
+  const [, assetOut, instant] = await publicGiwaClient.readContract({
+    address: zap,
+    abi: arcoSavingsZapQuoteAbi,
+    functionName: "quoteRedeem",
+    args: [shares, asset],
+  })
+  return { assetOut, instant }
+}
+
+export type ArcoUSDOperationCall = Readonly<{ address: HexAddress; abi: Abi; functionName: string; args: readonly unknown[] }>
+
+/**
+ * The call a product on ArcoUSD v1 (`product.arcoUSD`) makes for `operation`. The coin is the product's payment asset; a
+ * deposit takes `amount` of it, a withdrawal gives back `amount` of the product token (ArcoUSD or sArcoUSD) and is Instant
+ * only (Reserve.redeemInstantOnly; the Zap's redeem is Instant only too). What comes out goes to the account. Same
+ * testnet zero slippage floor as the vault deposits.
+ */
+export function arcoUSDOperationCall(args: {
+  account: HexAddress
+  product: GiwaCatalogItem
+  operation: ProductOperation
+  amount: bigint
+}): ArcoUSDOperationCall {
+  const transport = args.product.arcoUSD
+  if (!transport) throw new Error("This product is not on ArcoUSD")
+  const coin = args.product.paymentAssetAddress
+  if (!coin) throw new Error("Payment token address is missing")
+  if (args.operation !== "deposit" && args.operation !== "redeemInstant") {
+    throw new Error("Only instant deposits and withdrawals are available here")
+  }
+  const deposit = args.operation === "deposit"
+  const to = deposit ? args.product.depositVaultAddress : args.product.redemptionVaultAddress
+  if (!to) throw new Error("Vault address is missing from the registry")
+  if (transport.kind === "reserve") {
+    return deposit
+      ? { address: to, abi: arcoUSDReserveAbi, functionName: "deposit", args: [coin, args.amount, args.account] }
+      : { address: to, abi: arcoUSDReserveAbi, functionName: "redeemInstantOnly", args: [coin, args.amount, args.account, TESTNET_ZERO_SLIPPAGE_FLOOR] }
+  }
+  return deposit
+    ? { address: to, abi: arcoSavingsZapAbi, functionName: "deposit", args: [coin, args.amount, TESTNET_ZERO_SLIPPAGE_FLOOR, args.account] }
+    : { address: to, abi: arcoSavingsZapAbi, functionName: "redeem", args: [args.amount, coin, TESTNET_ZERO_SLIPPAGE_FLOOR, args.account] }
+}
+
+/** Send arcoUSDOperationCall's call (simulated first, like every other write). */
+export async function submitArcoUSDOperation(args: {
+  account: HexAddress
+  product: GiwaCatalogItem
+  operation: ProductOperation
+  amount: bigint
+}) {
+  return simulateAndWrite({ account: args.account, ...arcoUSDOperationCall(args) })
+}
+
+declare global {
+  interface Window {
+    ethereum?: {
+      request<T = unknown>(args: { method: string; params?: unknown[] | Record<string, unknown> }): Promise<T>
+      on?: (event: string, handler: (...args: unknown[]) => void) => void
+      removeListener?: (event: string, handler: (...args: unknown[]) => void) => void
+    }
+  }
+}

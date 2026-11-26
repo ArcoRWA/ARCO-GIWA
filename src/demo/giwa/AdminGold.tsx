@@ -1,0 +1,478 @@
+import type { ReactNode } from "react"
+import { useQuery } from "@tanstack/react-query"
+import { Loader2 } from "lucide-react"
+import { AddSurplusControl, type SurplusUnit } from "./AdminArcoUSD"
+import { useGiwaAdmin } from "./admin-context"
+import { giwaApi } from "./api"
+import { amountText, bpsText, shortAddress, sharePriceText, surplusRunwayText, usdText, type PauseRow } from "./arcousd-admin"
+import { afterConfirmedReceipt, readableError, sendPreparedTransaction } from "./contracts"
+import {
+  bpsPercentText,
+  goldApyText,
+  goldCover,
+  goldHeadline,
+  goldLiquidity,
+  goldNextDistribution,
+  goldRateNote,
+  goldSurplusStanding,
+  goldTimeText,
+  goldYieldPauseRows,
+  roundUpOunces,
+  mintHeadroomOunces,
+  sharePercentText,
+  waitText,
+  goldReservePauseRows,
+  goldVaultPauseRows,
+  ounceSourceLabel,
+  ouncesLabel,
+  ouncesText,
+} from "./gold-admin"
+import { Pill, type Tone } from "./stocks-admin/ui"
+import type { GiwaArcoGoldAddSurplus, GiwaArcoGoldReserve, GiwaArcoGoldSavings, GiwaArcoUSDAddSurplus } from "./types"
+import { explorerAddress } from "./wallet"
+
+// Admin · Gold: ArcoGOLD (the gold Savings account), its Reserve and what its distributor pays. It reads the same two
+// public endpoints the Savings page uses. Its one write is Add surplus: a transfer of a gold coin from the operator
+// wallet to the gold Reserve, built by the server and signed in the console (vault:write).
+
+const REFRESH = 30_000
+/** Past the API's 15 s cache, so a refetch after a send sees the new surplus. */
+const CACHE_SETTLE_MS = 16_000
+
+/** Add surplus in troy ounces: the same control as ArcoUSD's, with gold's words and four decimals. */
+const GOLD_SURPLUS_UNIT: SurplusUnit = {
+  idPrefix: "arcogold-surplus",
+  value: (amount) => ouncesLabel(amount),
+  coins: (amount) => ouncesText(amount),
+  roundUp: roundUpOunces,
+  placeholder: "0.5",
+  reserveName: "gold Reserve",
+  intro:
+    "Sends a gold coin from your operator wallet straight to the gold Reserve. Nothing is minted and nothing comes back: it is a gift that becomes ArcoGOLD yield. On mainnet this is the company paying the yield itself, not strategy income.",
+  sentNote: "The rate changes at the next distribution: the keeper runs it once it is due.",
+}
+const FOCUS_RING =
+  "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-arco-ink)]"
+
+export default function GiwaAdminGoldPage() {
+  const savingsQuery = useQuery({
+    queryKey: ["giwa", "admin-gold", "savings"],
+    queryFn: () => giwaApi.arcogold.savings(),
+    refetchInterval: REFRESH,
+  })
+  const reserveQuery = useQuery({
+    queryKey: ["giwa", "admin-gold", "reserve"],
+    queryFn: () => giwaApi.arcogold.reserve(),
+    refetchInterval: REFRESH,
+  })
+  const { auth, wallet } = useGiwaAdmin()
+
+  // A surplus transfer from the operator wallet, waited to confirmation; the distributor's preview follows the Reserve.
+  async function sendAddSurplus(prepared: GiwaArcoUSDAddSurplus, onSigned: (hash: string) => void): Promise<string> {
+    if (!wallet.address) throw new Error("Connect the operator wallet first")
+    const hash = await sendPreparedTransaction(wallet.address, prepared.transaction)
+    onSigned(hash)
+    const refetch = () => Promise.all([reserveQuery.refetch(), savingsQuery.refetch()])
+    await afterConfirmedReceipt(hash, async () => {
+      await refetch()
+    })
+    setTimeout(() => void refetch(), CACHE_SETTLE_MS)
+    return hash
+  }
+
+  return (
+    <GoldAdminView
+      addSurplus={{
+        walletAddress: wallet.address ?? null,
+        onConnectWallet: () => void wallet.connect(),
+        onPrepare: async (asset, amount) => asSurplusPreview(await giwaApi.admin.arcogoldAddSurplus(auth, asset, amount)),
+        onSend: sendAddSurplus,
+      }}
+      savings={savingsQuery.data ?? null}
+      savingsLoading={savingsQuery.isLoading}
+      savingsError={savingsQuery.error ? readableError(savingsQuery.error) : null}
+      reserve={reserveQuery.data ?? null}
+      reserveLoading={reserveQuery.isLoading}
+      reserveError={reserveQuery.error ? readableError(reserveQuery.error) : null}
+    />
+  )
+}
+
+/** The gold preview in the shape the shared control reads: its surplus figures are ounces here, not dollars. */
+export function asSurplusPreview(reply: GiwaArcoGoldAddSurplus): GiwaArcoUSDAddSurplus {
+  const { surplusBeforeOunces, surplusAfterOunces, ...rest } = reply
+  return { ...rest, surplusBeforeUsd: surplusBeforeOunces, surplusAfterUsd: surplusAfterOunces }
+}
+
+export type GoldAddSurplusProps = {
+  walletAddress: string | null
+  onConnectWallet: () => void
+  onPrepare: (asset: string, amount: string) => Promise<GiwaArcoUSDAddSurplus>
+  onSend: (prepared: GiwaArcoUSDAddSurplus, onSigned: (hash: string) => void) => Promise<string>
+}
+
+export function GoldAdminView({
+  addSurplus,
+  now = Date.now(),
+  savings,
+  savingsLoading = false,
+  savingsError = null,
+  reserve,
+  reserveLoading = false,
+  reserveError = null,
+}: {
+  /** Absent: the page is read-only (no Add surplus). */
+  addSurplus?: GoldAddSurplusProps
+  now?: number
+  savings: GiwaArcoGoldSavings | null
+  savingsLoading?: boolean
+  savingsError?: string | null
+  reserve: GiwaArcoGoldReserve | null
+  reserveLoading?: boolean
+  reserveError?: string | null
+}) {
+  const vault = savings?.savings ?? null
+  const reserveState = reserve?.reserve ?? null
+  const headline = goldHeadline(savings)
+  const cover = reserveState ? goldCover(reserveState) : null
+  const liquidity = reserveState ? goldLiquidity(reserveState) : null
+  const ounceUsd = savings?.ounceUsd ?? null
+  const headroom = reserveState ? mintHeadroomOunces(reserveState) : null
+  const goldYield = savings?.yield ?? null
+  const standing = reserveState && vault && goldYield ? goldSurplusStanding(reserveState, vault, goldYield) : null
+  const next = goldYield ? goldNextDistribution(goldYield, now) : null
+  return (
+    <div className="w-full space-y-6">
+      <header className="space-y-2">
+        <p className="text-xs text-[var(--color-arco-muted)]">Admin · Gold</p>
+        <h1 className="text-xl font-semibold text-[var(--color-arco-ink)]">ArcoGOLD</h1>
+        <div className="flex flex-wrap items-center gap-2 text-sm text-[var(--color-arco-muted)]">
+          <Pill tone={headline.tone}>{headline.label}</Pill>
+          <span>{headline.detail}</span>
+        </div>
+        <p className="text-[11px] text-[var(--color-arco-muted)]">
+          {goldYield && addSurplus
+            ? "Pausing and rates are not changed here. The one transaction this page sends is Add surplus."
+            : "Read-only. This page sends no transactions; pausing and rates are not changed here."}
+        </p>
+      </header>
+
+      {savingsLoading && !savings && <LoadingNote>Reading ArcoGOLD</LoadingNote>}
+      {savingsError && <ErrorLine>ArcoGOLD could not be loaded: {savingsError}</ErrorLine>}
+
+      <section aria-label="ArcoGOLD totals" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <TotalCard
+          label="Total deposits"
+          value={vault ? ouncesLabel(vault.totalAssetsOunces) : null}
+          sub={savings?.totalAssetsUsd ? `${usdText(savings.totalAssetsUsd)} at the ounce price` : "Ounces the vault counts"}
+        />
+        <TotalCard
+          label="ArcoGOLD price"
+          value={vault ? `${sharePriceText(vault.sharePriceHuman)} oz` : null}
+          sub={savings?.sharePriceUsd != null ? `${usdText(savings.sharePriceUsd)} per ArcoGOLD` : "Ounces per 1 ArcoGOLD"}
+        />
+        <TotalCard
+          label="Ounce price"
+          value={savings?.ounceUsd != null ? usdText(savings.ounceUsd) : null}
+          sub={savings?.ounceUsd != null ? ounceSourceLabel(savings.ounceUsdSource) : "No price from the rate source"}
+        />
+        <TotalCard
+          label={savings?.apySource === "distributor" ? "Rate" : "Display rate"}
+          value={savings ? goldApyText(savings.apyPercent) : null}
+          sub={goldRateNote(savings)}
+        />
+      </section>
+
+      {goldYield && (
+        <Card>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <CardTitle>Surplus for yield</CardTitle>
+            {goldYield.stale && <Pill tone="attention">Last good read</Pill>}
+          </div>
+          <p className="mt-1 text-[11px] text-[var(--color-arco-muted)]">
+            ArcoGOLD yield is paid from the gold Reserve's surplus above a safety margin of {bpsText(goldYield.distributor.reserveMarginBps)} of
+            what is owed, at most {bpsText(goldYield.distributor.maxAprBps)} a year. With no surplus above the margin the rate falls to 0%.
+          </p>
+          <dl className="mt-3 grid gap-x-8 gap-y-2 text-sm sm:grid-cols-2">
+            <Row label="Reserve surplus" value={standing ? ouncesLabel(standing.surplusUsd) : "—"} />
+            <Row label="Safety margin" value={standing ? ouncesLabel(standing.marginUsd) : "—"} />
+            <Row label="Payable as yield" value={standing ? ouncesLabel(standing.distributableUsd) : "—"} attention={standing ? standing.distributableUsd <= 0 : false} />
+            <Row label="Short of the margin" value={standing ? ouncesLabel(standing.shortfallUsd) : "—"} attention={standing ? standing.shortfallUsd > 0 : false} />
+            <Row label="One day at the APR cap" value={standing ? ouncesLabel(standing.dailyAtCapUsd) : "—"} />
+            <Row label="Lasts at the cap" value={standing ? surplusRunwayText(standing.daysAtCap) : "—"} attention={standing ? standing.daysAtCap !== null && standing.daysAtCap < 7 : false} />
+            <Row label="Paying now (APR)" value={bpsText(goldYield.currentAprBps)} />
+            <Row
+              label="Still vesting"
+              value={goldYield.vestingEndsAt ? `${ouncesLabel(goldYield.unvestedOunces)} until ${goldTimeText(goldYield.vestingEndsAt)}` : ouncesLabel(goldYield.unvestedOunces)}
+            />
+            <Row label="Last distribution" value={goldYield.distributed ? goldTimeText(goldYield.distributor.lastDistributionAt) : "None yet"} />
+            <Row label="Next distribution" value={next ? next.label : "—"} attention={next ? next.attention : false} />
+          </dl>
+          <PauseList rows={goldYieldPauseRows(goldYield)} />
+          {addSurplus && reserveState && vault && (
+            <AddSurplusControl
+              reserve={{ gate: { asset: reserveState.assets[0]?.symbol ?? "" }, reserve: reserveState }}
+              savings={{ totalAssets: vault.totalAssets, distributor: goldYield.distributor }}
+              unit={GOLD_SURPLUS_UNIT}
+              walletAddress={addSurplus.walletAddress}
+              onConnectWallet={addSurplus.onConnectWallet}
+              onPrepare={addSurplus.onPrepare}
+              onSend={addSurplus.onSend}
+            />
+          )}
+        </Card>
+      )}
+
+      <Card>
+        <CardTitle>Liquidity</CardTitle>
+        <p className="mt-1 text-[11px] text-[var(--color-arco-muted)]">
+          Where the Reserve's gold sits: coins in the buffer pay withdrawals; anything in strategies must be recalled first.
+        </p>
+        <div className="mt-4 grid gap-4 sm:grid-cols-3">
+          <Stat
+            label="Instant liquidity"
+            value={liquidity ? ouncesLabel(liquidity.instantOunces) : "—"}
+            sub={liquidity && ounceUsd != null ? `${usdText(liquidity.instantOunces * ounceUsd)} payable at once` : "Payable at once"}
+          />
+          <Stat
+            label="In the buffer"
+            value={liquidity ? ouncesLabel(liquidity.bufferOunces) : "—"}
+            sub={liquidity ? `${sharePercentText(liquidity.bufferPercent)} of the backing` : "Coins the Reserve holds"}
+          />
+          <Stat
+            label="In strategies"
+            value={liquidity ? ouncesLabel(liquidity.deployedOunces) : "—"}
+            sub={liquidity ? `${sharePercentText(liquidity.deployedPercent)} of the backing` : "Gold put to work"}
+          />
+        </div>
+        {liquidity && liquidity.bufferPercent !== null && (
+          <div className="mt-4">
+            <div
+              role="img"
+              aria-label={`Buffer ${sharePercentText(liquidity.bufferPercent)}, strategies ${sharePercentText(liquidity.deployedPercent)}`}
+              className="h-2 w-full overflow-hidden rounded-[var(--radius-pill)] bg-[var(--color-arco-surface-muted)]"
+            >
+              <div className="h-full bg-[var(--color-arco-ink)]" style={{ width: `${liquidity.bufferPercent}%` }} />
+            </div>
+            <div className="mt-1 flex justify-between text-[11px] text-[var(--color-arco-muted)]">
+              <span>Buffer {sharePercentText(liquidity.bufferPercent)}</span>
+              <span>Strategies {sharePercentText(liquidity.deployedPercent)}</span>
+            </div>
+          </div>
+        )}
+        <dl className="mt-4 grid gap-x-8 gap-y-2 border-t border-[var(--color-arco-border)] pt-4 text-sm sm:grid-cols-2">
+          <Row label="Owed to the Standard queue" value={liquidity ? ouncesLabel(liquidity.queuedOunces) : "—"} attention={liquidity ? liquidity.queuedOunces > 0 : false} />
+          <Row label="Buffer floor" value={bpsPercentText(reserveState?.bufferFloorBps)} />
+          <Row label="Strategy share now" value={bpsPercentText(reserveState?.mmfBps)} />
+          <Row label="Strategy target" value={bpsPercentText(reserveState?.mmfTargetBps)} />
+          <Row label="Standard queue wait (least)" value={waitText(reserveState?.queueMinDelay)} />
+          <Row label="Can still be minted" value={headroom === null ? "—" : ouncesLabel(headroom)} />
+        </dl>
+      </Card>
+
+      <section className="grid gap-4 lg:grid-cols-2">
+        <Card>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <CardTitle>ArcoGOLD vault</CardTitle>
+            {savings && <StatusLine status={savings.status} blockNumber={vault?.blockNumber} readAt={savings.readAt} />}
+          </div>
+          <dl className="mt-3 space-y-2 text-sm">
+            <Row label="Deposits" value={vault ? (vault.depositsOpen ? "Open" : "Closed") : "—"} attention={vault ? !vault.depositsOpen : false} />
+            <Row label="Withdrawals" value={vault ? (vault.withdrawalsOpen ? "Open" : "Closed") : "—"} attention={vault ? !vault.withdrawalsOpen : false} />
+            <Row label="Seeded" value={vault ? (vault.seeded ? "Yes" : "No") : "—"} attention={vault ? !vault.seeded : false} />
+            <Row label="ArcoGOLD in circulation" value={vault ? amountText(Number(vault.totalSupply) / 1e18, 4) : "—"} />
+          </dl>
+          <PauseList rows={vault ? goldVaultPauseRows(vault) : null} />
+        </Card>
+
+        <Card>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <CardTitle>Gold Reserve</CardTitle>
+            {reserve && <StatusLine status={reserve.status} blockNumber={reserveState?.blockNumber} readAt={reserve.readAt} />}
+          </div>
+          {reserveLoading && !reserve && <div className="mt-3"><LoadingNote>Reading the gold Reserve</LoadingNote></div>}
+          {reserveError && <div className="mt-3"><ErrorLine>The gold Reserve could not be loaded: {reserveError}</ErrorLine></div>}
+          <dl className="mt-3 space-y-2 text-sm">
+            <Row label="Backing" value={reserveState ? ouncesLabel(reserveState.totalBackingOunces) : "—"} />
+            <Row label="Owed (ArcoXAU issued)" value={reserveState ? ouncesLabel(reserveState.totalLiabilitiesOunces) : "—"} />
+            <Row label="Surplus" value={cover ? ouncesLabel(cover.surplusOunces) : "—"} attention={cover ? !cover.covered : false} />
+            <Row label="Cover" value={cover ? (cover.covered ? "Fully backed" : "Under-backed") : "—"} attention={cover ? !cover.covered : false} />
+          </dl>
+          <PauseList rows={reserveState ? goldReservePauseRows(reserveState) : null} />
+        </Card>
+      </section>
+
+      <Card>
+        <CardTitle>Reserve coins</CardTitle>
+        <p className="mt-1 text-[11px] text-[var(--color-arco-muted)]">Instant liquidity is what a withdrawal in that coin can take now: the balance less what the Standard queue is owed.</p>
+        <Table
+          caption="Gold Reserve coins"
+          head={["Coin", "Balance", "Queued", "Instant liquidity", "Queue backlog", "Swap fee", "Instant fee", "Deposit", "Redeem"]}
+          numeric={[1, 2, 3, 4, 5, 6]}
+          empty={reserveState ? "The gold Reserve lists no coins." : "—"}
+          rows={(reserveState?.assets ?? []).map((asset) => [
+            <span key="symbol" className="font-medium">{asset.symbol}</span>,
+            ouncesText(asset.balanceHuman),
+            ouncesText(asset.queuedHuman),
+            ouncesText(asset.availableHuman),
+            String(asset.queueBacklog),
+            bpsText(asset.swapFeeBps),
+            bpsText(asset.instantFeeBps),
+            <Pill key="deposit" tone={asset.depositEnabled ? "positive" : "neutral"}>{asset.depositEnabled ? "On" : "Off"}</Pill>,
+            <Pill key="redeem" tone={asset.redeemEnabled ? "positive" : "neutral"}>{asset.redeemEnabled ? "On" : "Off"}</Pill>,
+          ])}
+        />
+      </Card>
+
+      <Card>
+        <CardTitle>Contracts</CardTitle>
+        <dl className="mt-3 grid gap-x-8 gap-y-2 text-sm sm:grid-cols-2">
+          <AddressRow label="ArcoGOLD (vault)" address={savings?.contracts?.arcoGOLD ?? null} />
+          <AddressRow label="ArcoXAU (ounce unit)" address={savings?.contracts?.unit ?? reserve?.contracts?.unit ?? null} />
+          <AddressRow label="Gold Reserve" address={savings?.contracts?.reserve ?? reserve?.contracts?.reserve ?? null} />
+          <AddressRow label="Zap" address={savings?.contracts?.zap ?? null} />
+          <AddressRow label="Distributor" address={savings?.contracts?.distributor ?? null} />
+          <AddressRow label="Lens" address={reserve?.contracts?.lens ?? null} />
+        </dl>
+      </Card>
+    </div>
+  )
+}
+
+function StatusLine({ status, blockNumber, readAt }: { status: string; blockNumber?: string; readAt: string }) {
+  const tone: Tone = status === "live" ? "positive" : status === "unavailable" ? "negative" : "neutral"
+  const label = status === "live" ? "Live" : status === "unavailable" ? "Unavailable" : "Not deployed"
+  const read = new Date(readAt)
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-[11px] text-[var(--color-arco-muted)]">
+      <Pill tone={tone}>{label}</Pill>
+      {blockNumber && <span>Block {blockNumber}</span>}
+      {!Number.isNaN(read.getTime()) && <span>Read {read.toLocaleTimeString("en-US")}</span>}
+    </div>
+  )
+}
+
+function PauseList({ rows }: { rows: PauseRow[] | null }) {
+  if (!rows) return null
+  return (
+    <ul className="mt-4 divide-y divide-[var(--color-arco-border)] border-t border-[var(--color-arco-border)]">
+      {rows.map((row) => (
+        <li key={row.label} className="flex flex-wrap items-center justify-between gap-2 py-2">
+          <div>
+            <p className="text-sm text-[var(--color-arco-ink)]">{row.label}</p>
+            <p className="text-[11px] text-[var(--color-arco-muted)]">{row.effect}</p>
+          </div>
+          <Pill tone={row.paused ? "negative" : "neutral"}>{row.paused ? "Paused" : "Running"}</Pill>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+function Card({ children }: { children: ReactNode }) {
+  return <div className="w-full min-w-0 rounded-[var(--radius-card)] bg-[var(--color-arco-surface)] p-5 shadow-[var(--shadow-control)]">{children}</div>
+}
+
+function CardTitle({ children }: { children: ReactNode }) {
+  return <h2 className="text-sm font-semibold text-[var(--color-arco-ink)]">{children}</h2>
+}
+
+function TotalCard({ label, sub, value }: { label: string; sub: string; value: string | null }) {
+  return (
+    <div className="w-full min-w-0 rounded-[var(--radius-card)] bg-[var(--color-arco-surface)] p-4 shadow-[var(--shadow-control)]">
+      <p className="text-xs text-[var(--color-arco-muted)]">{label}</p>
+      <p className="mt-1 tabular-nums text-2xl font-semibold text-[var(--color-arco-ink)]">{value ?? "—"}</p>
+      <p className="mt-1 text-[11px] text-[var(--color-arco-muted)]">{sub}</p>
+    </div>
+  )
+}
+
+function Stat({ label, sub, value }: { label: string; sub: string; value: string }) {
+  return (
+    <div className="w-full min-w-0">
+      <p className="text-xs text-[var(--color-arco-muted)]">{label}</p>
+      <p className="mt-1 tabular-nums text-xl font-semibold text-[var(--color-arco-ink)]">{value}</p>
+      <p className="mt-1 text-[11px] text-[var(--color-arco-muted)]">{sub}</p>
+    </div>
+  )
+}
+
+function Row({ label, value, attention = false }: { label: string; value: ReactNode; attention?: boolean }) {
+  return (
+    <div className="flex flex-wrap items-baseline justify-between gap-2">
+      <dt className="text-[var(--color-arco-muted)]">{label}</dt>
+      <dd className={`tabular-nums ${attention ? "font-medium text-[var(--color-arco-down)]" : "text-[var(--color-arco-ink)]"}`}>{value}</dd>
+    </div>
+  )
+}
+
+function AddressRow({ label, address }: { label: string; address: string | null }) {
+  return (
+    <Row
+      label={label}
+      value={
+        address ? (
+          <a
+            href={explorerAddress(address)}
+            target="_blank"
+            rel="noreferrer"
+            title={address}
+            className={`font-mono text-[var(--color-arco-text-soft)] underline-offset-2 hover:underline ${FOCUS_RING}`}
+          >
+            {shortAddress(address)}
+          </a>
+        ) : (
+          "—"
+        )
+      }
+    />
+  )
+}
+
+function Table({ caption, head, rows, numeric = [], empty }: { caption: string; head: string[]; rows: ReactNode[][]; numeric?: number[]; empty: string }) {
+  if (rows.length === 0) return <p className="mt-3 text-sm text-[var(--color-arco-muted)]">{empty}</p>
+  return (
+    <div className="mt-3 w-full overflow-x-auto">
+      <table className="w-full text-sm">
+        <caption className="sr-only">{caption}</caption>
+        <thead>
+          <tr className="border-b border-[var(--color-arco-border)] text-[11px] text-[var(--color-arco-muted)]">
+            {head.map((cell, index) => (
+              <th key={cell} scope="col" className={`whitespace-nowrap px-2 py-2 font-medium ${numeric.includes(index) ? "text-right" : "text-left"}`}>
+                {cell}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, rowIndex) => (
+            <tr key={rowIndex} className="border-b border-[var(--color-arco-border)] last:border-b-0">
+              {row.map((cell, index) => (
+                <td key={index} className={`whitespace-nowrap px-2 py-2 text-[var(--color-arco-ink)] ${numeric.includes(index) ? "text-right tabular-nums" : "text-left"}`}>
+                  {cell}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function LoadingNote({ children }: { children: ReactNode }) {
+  return (
+    <p className="text-sm text-[var(--color-arco-muted)]">
+      <Loader2 className="mr-1.5 inline size-3.5 animate-spin" />
+      {children}
+    </p>
+  )
+}
+
+function ErrorLine({ children }: { children: ReactNode }) {
+  return (
+    <p role="alert" className="text-sm text-[var(--color-arco-down)]">
+      {children}
+    </p>
+  )
+}

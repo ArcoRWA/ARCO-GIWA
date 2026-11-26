@@ -1,0 +1,64 @@
+import { freezeManifest, immutable, manifestDigest, StocksError, type Manifest } from '../stocks/contracts.js';
+import { validateKmsFees, validateKmsIdentity, type KmsFees } from './custody-kms.js';
+import type { SignedTransactionLimits } from './original-transport.js';
+
+export type SignerHostConfig = Readonly<{
+  manifest: Manifest; reviewedManifestDigest: string; reviewedInitialNonce: string;
+  rpcUrl: string; listen: Readonly<{ host: '127.0.0.1' | '0.0.0.0'; port: number }>;
+  custody: Readonly<{ type: 'AWS_KMS'; region: string; keyArn: string; exclusiveAccountControlConfirmed: true }>
+    | Readonly<{ type: 'LOCAL_KEYSTORE'; exclusiveAccountControlConfirmed: true }>
+    | Readonly<{ type: 'SECRET_FILE_KEYSTORE'; exclusiveAccountControlConfirmed: true }>;
+  transaction: KmsFees; limits: SignedTransactionLimits;
+}>;
+const fail = () => new StocksError('SIGNER_HOST_CONFIGURATION_INVALID', 503);
+function record(value: unknown, fields: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).sort().join(',') !== fields.split(',').sort().join(',')) throw fail();
+  return value as Record<string, unknown>;
+}
+function decimal(value: unknown): bigint {
+  if (typeof value !== 'string' || !/^(0|[1-9][0-9]{0,77})$/.test(value) || BigInt(value) >= 2n ** 256n) throw fail();
+  return BigInt(value);
+}
+export function parseSignerHostConfig(value: unknown): SignerHostConfig {
+  try {
+    const row = record(value, 'schemaVersion,profile,manifest,reviewedManifestDigest,reviewedInitialNonce,rpcUrl,listen,custody,transaction,limits');
+    if (row.schemaVersion !== 1 || row.profile !== 'DEMO_TESTNET') throw fail();
+    const externalCash = row.manifest && typeof row.manifest === 'object'
+      && (row.manifest as Record<string, unknown>).schemaVersion === 3;
+    record(row.manifest, 'schemaVersion,redemptionEscrow,deploymentId,profile,chainId,networkInstance,checkpointNumber,checkpointHash,abiDigest,finalityPolicy,cashToken,cashSymbol,cashScale,stockToken,quantityScale,fundingVault,mintController,signerAddress,codeHashes,restrictedTransfers,nonUpgradeable'
+      + (externalCash ? ',stockContractsNonUpgradeable,cashIdentity' : ''));
+    const manifest = freezeManifest(row.manifest as Manifest);
+    if (row.reviewedManifestDigest !== manifestDigest(manifest)
+      || decimal(row.reviewedInitialNonce) > BigInt(Number.MAX_SAFE_INTEGER)) throw fail();
+    // This service intentionally targets the same public GIWA network as the demo.
+    if (row.rpcUrl !== 'https://sepolia-rpc.giwa.io') throw fail();
+    const listen = record(row.listen, 'host,port');
+    if (!['127.0.0.1', '0.0.0.0'].includes(listen.host as string) || !Number.isSafeInteger(listen.port)
+      || (listen.port as number) < 1024 || (listen.port as number) > 65535) throw fail();
+    const custodyType = row.custody && typeof row.custody === 'object' && !Array.isArray(row.custody)
+      ? (row.custody as Record<string, unknown>).type : undefined;
+    const keystore = custodyType === 'LOCAL_KEYSTORE' || custodyType === 'SECRET_FILE_KEYSTORE';
+    const custody = record(row.custody, keystore ? 'type,exclusiveAccountControlConfirmed' : 'type,region,keyArn,exclusiveAccountControlConfirmed');
+    if (custody.exclusiveAccountControlConfirmed !== true) throw fail();
+    if (custodyType === 'LOCAL_KEYSTORE') {
+      // A separately secured HTTPS ingress may forward here; never expose a plaintext key host.
+      if (listen.host !== '127.0.0.1') throw fail();
+    } else if (custodyType === 'SECRET_FILE_KEYSTORE') {
+      // Hosted, non-interactive launcher (scripts/stocks-signer/run-service.mjs): the encrypted
+      // keystore and its password arrive as platform secret files. It may bind the platform's
+      // private network (0.0.0.0 inside a private service); it must never get a public ingress.
+    } else {
+      if (custody.type !== 'AWS_KMS' || typeof custody.region !== 'string' || typeof custody.keyArn !== 'string') throw fail();
+      validateKmsIdentity({ region: custody.region, keyArn: custody.keyArn, signerAddress: manifest.signerAddress });
+    }
+    const tx = record(row.transaction, 'gas,maxFeePerGas,maxPriorityFeePerGas');
+    const cap = record(row.limits, 'maxGas,maxFeePerGas,maxTotalFeeWei');
+    const transaction = { gas: decimal(tx.gas), maxFeePerGas: decimal(tx.maxFeePerGas), maxPriorityFeePerGas: decimal(tx.maxPriorityFeePerGas) };
+    const limits = { maxGas: decimal(cap.maxGas), maxFeePerGas: decimal(cap.maxFeePerGas), maxTotalFeeWei: decimal(cap.maxTotalFeeWei) };
+    validateKmsFees(transaction, limits);
+    return immutable({ manifest, reviewedManifestDigest: row.reviewedManifestDigest as string,
+      reviewedInitialNonce: row.reviewedInitialNonce as string, rpcUrl: row.rpcUrl,
+      listen: listen as SignerHostConfig['listen'], custody: custody as SignerHostConfig['custody'], transaction, limits });
+  } catch { throw fail(); }
+}

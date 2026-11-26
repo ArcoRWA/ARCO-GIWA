@@ -1,0 +1,804 @@
+/* ──────────────────────────────────────────────────────────────────────────
+   Arco demo — light theme tokens, scoped to `.arco-demo` only.
+   The landing stays dark (its tokens live on :root in index.css and are not
+   touched here). Values are HSL channels (shadcn convention) unless noted.
+   ────────────────────────────────────────────────────────────────────────── */
+.arco-demo {
+  /* surfaces */
+  --background: 47 33% 95%; /* #F5F4ED */
+  --foreground: 220 8% 8%; /* #111214 */
+  --card: 0 0% 100%;
+  --card-foreground: 220 8% 8%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 220 8% 8%;
+
+  /* muted / borders */
+  --muted: 43 38% 96%; /* #FAF8F1 */
+  --muted-foreground: 222 5% 56%;
+  --border: 43 27% 87%; /* #E8E6DC */
+  --input: 43 27% 87%; /* = border */
+  --ring: 220 8% 8%; /* focus ring = foreground */
+
+  /* primary = CTA black (never the cream brand color) */
+  --primary: 220 8% 8%; /* 검정 */
+  --primary-foreground: 0 0% 100%;
+
+  /* secondary / accent — derived from muted to keep the warm light surface */
+  --secondary: 43 38% 96%;
+  --secondary-foreground: 220 8% 8%;
+  --accent: 43 38% 96%;
+  --accent-foreground: 220 8% 8%;
+
+  /* destructive aligns with --danger below */
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 0 0% 100%;
+
+  --radius: 0.75rem;
+
+  /* ── custom tokens (intentionally NOT registered as Tailwind colors) ───────
+     Use via arbitrary values, e.g. text-[hsl(var(--success))]. */
+  --brand-cream: #e1e0cc; /* ceremony / logo only */
+  --success: 142 71% 38%; /* gains / confirmed (never primary) */
+  --warning: 38 92% 50%;
+  --danger: 0 72% 51%;
+}
+
+/* A restrained double beat on the Live badge halo; the center dot stays legible. */
+.arco-demo .arco-live-heartbeat {
+  transform-origin: center;
+  animation: arco-live-heartbeat 3.6s ease-in-out infinite;
+}
+
+@keyframes arco-live-heartbeat {
+  0%, 43%, 100% { transform: scale(1); opacity: 0.4; }
+  10% { transform: scale(1.3); opacity: 0.5; }
+  18% { transform: scale(1); opacity: 0.35; }
+  29% { transform: scale(1.7); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .arco-demo .arco-live-heartbeat { animation: none; }
+}
+
+/* Savings card: an aurora behind the grid, and the "scroll on" chevrons. The aurora is four soft curtains of light
+   (SavingsHeroCard.tsx), each on its own slow back-and-forth loop; screen blending adds them up as light on the dark
+   card. Translations are shares of each curtain's own box. */
+.arco-demo .savings-aurora-a,
+.arco-demo .savings-aurora-b,
+.arco-demo .savings-aurora-c,
+.arco-demo .savings-aurora-d {
+  opacity: 0.75;
+  mix-blend-mode: screen;
+  will-change: transform;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  animation-direction: alternate;
+}
+.arco-demo .savings-aurora-a { animation-name: savings-aurora-a; animation-duration: 26s; }
+.arco-demo .savings-aurora-b { animation-name: savings-aurora-b; animation-duration: 32s; animation-delay: -9s; }
+.arco-demo .savings-aurora-c { animation-name: savings-aurora-c; animation-duration: 38s; animation-delay: -17s; }
+.arco-demo .savings-aurora-d { animation-name: savings-aurora-d; animation-duration: 21s; animation-delay: -5s; }
+
+@keyframes savings-aurora-a {
+  0% { transform: translate(0, 0) rotate(-14deg) scale(1, 1); }
+  50% { transform: translate(70%, 8%) rotate(-4deg) scale(1.2, 0.9); }
+  100% { transform: translate(150%, -6%) rotate(-18deg) scale(0.9, 1.1); }
+}
+@keyframes savings-aurora-b {
+  0% { transform: translate(0, 0) rotate(16deg) scale(1, 1); }
+  50% { transform: translate(-80%, 10%) rotate(6deg) scale(1.25, 0.95); }
+  100% { transform: translate(-170%, -4%) rotate(20deg) scale(0.9, 1.05); }
+}
+@keyframes savings-aurora-c {
+  0% { transform: translate(-10%, 0) scale(1); }
+  50% { transform: translate(15%, -12%) scale(1.15); }
+  100% { transform: translate(30%, 6%) scale(0.95); }
+}
+@keyframes savings-aurora-d {
+  0% { transform: translate(-120%, 0) rotate(22deg); }
+  100% { transform: translate(260%, 0) rotate(8deg); }
+}
+
+/* The Crypto Native card (data-savings-tone="cream"): black, with its grid, hairlines, panels and aurora in cream
+   (#E1E0CC, --color-arco-cream) instead of white and blue. Re-scoped here so the card's own styles stay the same. */
+.arco-demo [data-savings-tone="cream"] {
+  --color-savings-on-hero-line: rgba(225, 224, 204, 0.18);
+  --color-savings-on-hero-fill: rgba(225, 224, 204, 0.08);
+  --color-savings-aurora-1: rgba(225, 224, 204, 0.26);
+  --color-savings-aurora-2: rgba(225, 224, 204, 0.13);
+  --color-savings-aurora-3: rgba(225, 224, 204, 0.16);
+  --color-savings-aurora-4: rgba(225, 224, 204, 0.2);
+  --color-savings-orbit-line: rgba(225, 224, 204, 0.3);
+  --color-savings-orbit-dot: rgba(255, 253, 235, 0.95);
+  --color-savings-glass-tint: rgba(255, 255, 255, 0.05);
+  --color-savings-glass-rim: rgba(255, 255, 240, 0.5);
+  --color-savings-glass-rim-soft: rgba(255, 255, 255, 0.12);
+  --color-savings-glass-lens: rgba(255, 255, 240, 0.14);
+  --savings-glass-lens-backdrop: blur(1px) saturate(220%) brightness(1.18);
+  --color-savings-glass-shadow: rgba(0, 0, 0, 0.5);
+  --color-savings-glass-menu: rgba(26, 26, 24, 0.86);
+}
+
+/* The Gold card (data-savings-tone="gold", ArcoGOLD): light gold (#FFF3B3 → #FFED8A → #FFE23D) with dark brown text,
+   so every colour drawn on the card is re-scoped: text, muted text, hairlines, panels, the aurora (white and gold),
+   the Deposit button (brown with gold text), the Earning pill (a dark green that reads on the pale gold) and the
+   connect pill's pointed-at look (on-dark bg with hero text: brown with gold text here). Focus rings follow the text
+   colour (--color-arco-on-dark), so they stay visible. The info tips keep their navy bubble with white text. */
+.arco-demo [data-savings-tone="gold"] {
+  --color-arco-on-dark: var(--color-savings-gold-ink);
+  --color-arco-hero: var(--color-savings-gold-3);
+  --color-savings-on-hero-muted: var(--color-savings-gold-muted);
+  --color-savings-on-hero-line: var(--color-savings-gold-line);
+  --color-savings-on-hero-fill: var(--color-savings-gold-fill);
+  --color-savings-aurora-1: var(--color-savings-gold-aurora-1);
+  --color-savings-aurora-2: var(--color-savings-gold-aurora-2);
+  --color-savings-aurora-3: var(--color-savings-gold-aurora-3);
+  --color-savings-aurora-4: var(--color-savings-gold-aurora-4);
+  --color-savings-hero-cta: var(--color-savings-gold-cta);
+  --color-savings-hero-cta-ink: var(--color-savings-gold-3);
+  --color-savings-hero-cta-hover: var(--color-savings-gold-cta-hover);
+  --color-savings-hero-earning: var(--color-savings-gold-earning);
+  --color-savings-orbit-line: var(--color-savings-gold-orbit-line);
+  --color-savings-orbit-dot: var(--color-savings-gold-orbit-dot);
+  --color-savings-glass-tint: var(--color-savings-gold-glass-tint);
+  --color-savings-glass-rim: var(--color-savings-gold-glass-rim);
+  --color-savings-glass-rim-soft: var(--color-savings-gold-glass-rim-soft);
+  --color-savings-glass-lens: var(--color-savings-gold-glass-lens);
+  --savings-glass-lens-backdrop: blur(1px) saturate(220%) brightness(1.18);
+  --color-savings-glass-shadow: var(--color-savings-gold-glass-shadow);
+  --color-savings-glass-menu: var(--color-savings-gold-glass-menu);
+}
+
+/* The Backing bar under the Savings card follows the account's tone (SavingsBreakdown.tsx, data-savings-bar-tone):
+   navy for Stablecoins (the default ramp), near-black to cream for Crypto Native, brown to pale gold for Gold. Only
+   the bar's own colours are re-scoped, so nothing else under the card changes. */
+.arco-demo [data-savings-bar-tone="cream"] {
+  --color-savings-bar-1: var(--color-savings-cream-bar-1);
+  --color-savings-bar-2: var(--color-savings-cream-bar-2);
+  --color-savings-bar-3: var(--color-savings-cream-bar-3);
+  --color-savings-bar-4: var(--color-savings-cream-bar-4);
+  --color-savings-bar-5: var(--color-savings-cream-bar-5);
+}
+.arco-demo [data-savings-bar-tone="gold"] {
+  --color-savings-bar-1: var(--color-savings-gold-ink);
+  --color-savings-bar-2: var(--color-savings-gold-bar-2);
+  --color-savings-bar-3: var(--color-savings-gold-bar-3);
+  --color-savings-bar-4: var(--color-savings-gold-bar-4);
+  --color-savings-bar-5: var(--color-savings-gold-bar-5);
+}
+
+/* The Featured Funds card (FeaturedFunds.tsx, data-funds-hero): the Savings card's grid and aurora on an espresso
+   backdrop, the aurora in cream instead of blues. Re-scoped here so the aurora component and its loops stay the
+   Savings card's own. */
+.arco-demo [data-funds-hero] {
+  --color-savings-aurora-1: var(--color-funds-aurora-1);
+  --color-savings-aurora-2: var(--color-funds-aurora-2);
+  --color-savings-aurora-3: var(--color-funds-aurora-3);
+  --color-savings-aurora-4: var(--color-funds-aurora-4);
+}
+
+/* The fund's mark in a dark glass orb on the Featured Funds card (FundOrb.tsx): a smoked-glass sphere with a cream
+   rim light, a top shine and the mark glowing cream inside. Sizes scale with --funds-orb-size (set on the orb), so one
+   look serves the 280px orb on wide screens and the small one beside the title. It stays still. */
+.arco-demo .funds-orb {
+  --funds-orb-size: 280px;
+  position: relative;
+  width: var(--funds-orb-size);
+  height: var(--funds-orb-size);
+  border-radius: 9999px;
+  overflow: hidden;
+  background: radial-gradient(circle at 50% 56%, #24211d 0%, #121110 52%, #050505 100%);
+  box-shadow:
+    inset 0 0 0 calc(var(--funds-orb-size) * 0.005 + 1px) rgba(225, 224, 204, 0.22),
+    inset 0 calc(var(--funds-orb-size) * 0.09) calc(var(--funds-orb-size) * 0.2) rgba(0, 0, 0, 0.65),
+    inset 0 calc(var(--funds-orb-size) * -0.08) calc(var(--funds-orb-size) * 0.16) rgba(225, 224, 204, 0.07),
+    0 calc(var(--funds-orb-size) * 0.13) calc(var(--funds-orb-size) * 0.27) rgba(0, 0, 0, 0.55);
+}
+.arco-demo .funds-orb-rim {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background:
+    radial-gradient(circle at 18% 28%, rgba(225, 224, 204, 0.22), transparent 22%),
+    radial-gradient(circle at 78% 86%, rgba(255, 214, 170, 0.22), transparent 18%),
+    radial-gradient(circle at 50% 50%, transparent 64%, rgba(225, 224, 204, 0.12) 70%, transparent 72%);
+}
+.arco-demo .funds-orb-glyph {
+  /* Dead centre: the mark's box sits on the orb's centre, both ways. */
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  height: auto;
+  transform: translate(-50%, -50%);
+  filter:
+    drop-shadow(0 0 calc(var(--funds-orb-size) * 0.02) rgba(255, 252, 240, 0.95))
+    drop-shadow(0 0 calc(var(--funds-orb-size) * 0.09) rgba(225, 224, 204, 0.75))
+    drop-shadow(0 0 calc(var(--funds-orb-size) * 0.2) rgba(225, 224, 204, 0.35));
+}
+.arco-demo .funds-orb-shine {
+  /* A soft light from the top of the sphere that fades out with no edge, so it follows the curve of the glass. */
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: radial-gradient(ellipse 72% 52% at 50% 0%, rgba(255, 255, 255, 0.26), rgba(255, 255, 255, 0.07) 55%, rgba(255, 255, 255, 0) 80%);
+}
+
+/* On a phone the card is narrow and tall, so the curtains crowd behind its text: fainter there. */
+@media (max-width: 639px) {
+  .arco-demo .savings-aurora-a,
+  .arco-demo .savings-aurora-b,
+  .arco-demo .savings-aurora-c,
+  .arco-demo .savings-aurora-d { opacity: 0.65; }
+}
+
+.arco-demo .savings-chevron {
+  animation: savings-chevron 1.8s ease-in-out infinite;
+}
+
+@keyframes savings-chevron {
+  0%, 100% { opacity: 0.2; }
+  50% { opacity: 0.85; }
+}
+
+/* Savings card orbits (look "E2b", SavingsHeroCard.tsx HeroOrbits): three concentric ellipses tilted -16deg in the
+   card's lower right, in the card's orbit line colour, each with one small glowing dot travelling it at its own speed
+   (6s, 9s, 13s a lap; the middle one the other way round). The box is a fixed 660 x 300 because the dots' paths are in
+   its pixels. On a phone the card is narrow and tall, so the box moves right (only its left half shows).
+   Reduced motion: the dots stand still, each at a fixed spot (at least one shows on each wide card); without
+   offset-path support they stand at about the same spots. Each dot starts its loop from its still spot (the negative
+   delay), so turning motion on or off does not make them jump. */
+.arco-demo .savings-orbits {
+  position: absolute;
+  right: -90px;
+  bottom: -40px;
+  width: 660px;
+  height: 300px;
+  transform: rotate(-16deg);
+}
+@media (max-width: 767px) {
+  .arco-demo .savings-orbits { right: -380px; bottom: 60px; }
+}
+
+/* Kept off the text: every pixel of a line or a dot's glow behind small text was measured (worst case over a lap);
+   these masks are where they would take it below AA (4.5:1 body, 3:1 large). Lines behind the frosted panels (the
+   slides, the Available strip) and the solid pill / buttons are fine; a dot's glow is not, even blurred, so the dots
+   show only where no text is. Each mask is in the card's own pixels (the layer is the card's box). */
+.arco-demo .savings-orbit-layer {
+  position: absolute;
+  inset: 0;
+}
+/* Welcome card, wide: the dots show only in the bottom of the right column, around the Connect Wallet pill (not
+   behind the slides panel, its controls or the left column's text). The lines need no mask. Since the tabs moved into
+   the card the layer is the content's box under them (SavingsHeroCard HeroFrame): the slides' controls end at 194px
+   of it and the pill starts at 216px, so the dots begin a little under the controls. */
+.arco-demo [data-hero-orbits="welcome"] .savings-orbit-dots {
+  -webkit-mask-image: linear-gradient(to left, #000 320px, transparent 340px), linear-gradient(to bottom, transparent 220px, #000 240px);
+  -webkit-mask-composite: source-in;
+  mask-image: linear-gradient(to left, #000 320px, transparent 340px), linear-gradient(to bottom, transparent 220px, #000 240px);
+  mask-composite: intersect;
+}
+/* A full-width card (912px) has room between the token row and the right column, so the dots show there too. */
+@media (min-width: 976px) {
+  .arco-demo [data-hero-orbits="welcome"] .savings-orbit-dots {
+    -webkit-mask-image: linear-gradient(to right, transparent 430px, #000 450px), linear-gradient(to bottom, transparent 220px, #000 240px);
+    mask-image: linear-gradient(to right, transparent 430px, #000 450px), linear-gradient(to bottom, transparent 220px, #000 240px);
+  }
+}
+/* Connected card, wide: the dots show only in the middle (right of the balance, left of the Earning pill and the
+   partner logos); the lines skip the Earning pill and "Powered by". */
+.arco-demo [data-hero-orbits="connected"] .savings-orbit-dots {
+  -webkit-mask-image: linear-gradient(to right, transparent 46%, #000 52%), linear-gradient(to left, transparent 200px, #000 230px);
+  -webkit-mask-composite: source-in;
+  mask-image: linear-gradient(to right, transparent 46%, #000 52%), linear-gradient(to left, transparent 200px, #000 230px);
+  mask-composite: intersect;
+}
+.arco-demo [data-hero-orbits="connected"] .savings-orbit-lines {
+  -webkit-mask-image: radial-gradient(64px 24px at calc(100% - 59px) 34px, transparent 70%, #000 100%), radial-gradient(118px 30px at calc(100% - 103px) 162px, transparent 72%, #000 100%);
+  -webkit-mask-composite: source-in;
+  mask-image: radial-gradient(64px 24px at calc(100% - 59px) 34px, transparent 70%, #000 100%), radial-gradient(118px 30px at calc(100% - 103px) 162px, transparent 72%, #000 100%);
+  mask-composite: intersect;
+}
+/* The Portfolio card (PortfolioHero.tsx, look "A"): the orbits as lines only, no dots. Wide, the lines keep to the
+   right of the current value and its labels (behind the glass panels they are fine); on a phone, where the text runs
+   the card's full width, they keep to the bottom, behind the glass panels. */
+.arco-demo [data-hero-orbits="portfolio"] .savings-orbit-dots { display: none; }
+.arco-demo [data-hero-orbits="portfolio"] .savings-orbit-lines {
+  -webkit-mask-image: linear-gradient(to right, transparent 50%, #000 58%);
+  mask-image: linear-gradient(to right, transparent 50%, #000 58%);
+}
+@media (max-width: 767px) {
+  .arco-demo [data-hero-orbits="portfolio"] .savings-orbit-lines {
+    -webkit-mask-image: linear-gradient(to top, #000 84px, transparent 100px);
+    mask-image: linear-gradient(to top, #000 84px, transparent 100px);
+  }
+}
+/* Phones: text runs the card's full width, so the dots stay hidden. The welcome card's orbits sit lower (behind the
+   pill and the frosted slides, clear of the token row); the connected card's lines skip the Earning pill. */
+@media (max-width: 767px) {
+  .arco-demo [data-hero-orbits] .savings-orbit-dots { display: none; }
+  .arco-demo [data-hero-orbits="welcome"] .savings-orbits { bottom: -60px; }
+  .arco-demo [data-hero-orbits="connected"] .savings-orbit-lines {
+    -webkit-mask-image: radial-gradient(62px 22px at calc(100% - 55px) 30px, transparent 70%, #000 100%), radial-gradient(80px 26px at 56px 170px, transparent 70%, #000 100%);
+    mask-image: radial-gradient(62px 22px at calc(100% - 55px) 30px, transparent 70%, #000 100%), radial-gradient(80px 26px at 56px 170px, transparent 70%, #000 100%);
+  }
+}
+/* Welcome card on a narrow wide screen (card under 912px): the outer orbit reaches into the left column (the headline
+   and the APY at its top), so the lines keep to the right column, and to the token row's height in the left one. */
+@media (min-width: 768px) and (max-width: 975px) {
+  .arco-demo [data-hero-orbits="welcome"] .savings-orbit-lines {
+    -webkit-mask-image: linear-gradient(to left, #000 360px, transparent 380px), linear-gradient(to bottom, transparent 228px, #000 248px);
+    -webkit-mask-composite: source-over;
+    mask-image: linear-gradient(to left, #000 360px, transparent 380px), linear-gradient(to bottom, transparent 228px, #000 248px);
+    mask-composite: add;
+  }
+}
+.arco-demo .savings-orbit {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px solid var(--color-savings-orbit-line);
+  border-radius: 50%;
+}
+.arco-demo .savings-orbit-1 { inset: 0; }
+.arco-demo .savings-orbit-2 { inset: 44px 96px; }
+.arco-demo .savings-orbit-3 { inset: 88px 192px; }
+.arco-demo .savings-orbit-dot {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--color-savings-orbit-dot);
+  box-shadow: 0 0 16px 6px var(--color-savings-orbit-dot);
+  offset-rotate: 0deg;
+  offset-anchor: 50% 50%;
+  animation: savings-orbit 9s linear infinite;
+}
+.arco-demo .savings-orbit-dot-a { offset-path: path("M 0 150 A 330 150 0 1 1 660 150 A 330 150 0 1 1 0 150"); offset-distance: 5%; animation-delay: -0.45s; }
+.arco-demo .savings-orbit-dot-b { offset-path: path("M 96 150 A 234 106 0 1 0 564 150 A 234 106 0 1 0 96 150"); offset-distance: 75%; animation-duration: 13s; animation-delay: -9.75s; }
+.arco-demo .savings-orbit-dot-c { offset-path: path("M 192 150 A 138 62 0 1 1 468 150 A 138 62 0 1 1 192 150"); offset-distance: 60%; animation-duration: 6s; animation-delay: -3.6s; }
+
+@keyframes savings-orbit {
+  from { offset-distance: 0%; }
+  to { offset-distance: 100%; }
+}
+
+@supports not (offset-path: path("M 0 0 L 1 1")) {
+  .arco-demo .savings-orbit-dot { animation: none; margin: -4.5px 0 0 -4.5px; }
+  .arco-demo .savings-orbit-dot-a { left: 40px; top: 78px; }
+  .arco-demo .savings-orbit-dot-b { left: 330px; top: 44px; }
+  .arco-demo .savings-orbit-dot-c { left: 444px; top: 185px; }
+}
+
+/* Liquid glass on the Savings card (SavingsTabs.tsx, SavingsHeroCard.tsx): nearly clear, a low blur with the colours
+   behind it lifted (saturate, brightness), a bright rim along the top, a faint rim at the sides and bottom, and a soft
+   drop shadow. Where a browser takes an SVG filter as a backdrop filter (Chromium), the light behind also bends a
+   little (the displacement filter SavingsTabs renders once, #savings-glass-refraction); Safari and Firefox keep the
+   plain blur, a clean glass with no bending. The colours are the card's own (--color-savings-glass-*, re-scoped by
+   the cream and gold cards). */
+.arco-demo .savings-glass {
+  background: var(--color-savings-glass-tint);
+  -webkit-backdrop-filter: blur(3px) saturate(180%) brightness(1.08);
+  backdrop-filter: blur(3px) saturate(180%) brightness(1.08);
+  box-shadow:
+    inset 0 1px 0 var(--color-savings-glass-rim),
+    inset 1px 0 0 var(--color-savings-glass-rim-soft),
+    inset -1px 0 0 var(--color-savings-glass-rim-soft),
+    inset 0 -1px 0 var(--color-savings-glass-rim-soft),
+    inset 0 10px 14px -10px var(--color-savings-glass-rim),
+    inset 0 -12px 16px -12px var(--color-savings-glass-rim-soft),
+    0 10px 30px -6px var(--color-savings-glass-shadow),
+    0 2px 6px var(--color-savings-glass-shadow);
+}
+/* The slides panel carries text over the aurora, so its glass blurs more (the same rim and shadow). */
+.arco-demo .savings-glass-panel {
+  -webkit-backdrop-filter: blur(10px) saturate(160%) brightness(1.04);
+  backdrop-filter: blur(10px) saturate(160%) brightness(1.04);
+}
+@supports (backdrop-filter: url(#savings-glass-refraction)) and (not (font: -apple-system-body)) and (not (-moz-appearance: none)) {
+  .arco-demo .savings-glass { backdrop-filter: url(#savings-glass-refraction) blur(2px) saturate(180%) brightness(1.08); }
+  .arco-demo .savings-glass-panel { backdrop-filter: url(#savings-glass-refraction) blur(10px) saturate(160%) brightness(1.04); }
+}
+/* A brighter piece of glass: the selected row in the Crypto menu, the slides' icon tile. */
+.arco-demo .savings-glass-piece {
+  background: var(--color-savings-glass-lens);
+  box-shadow: inset 0 1px 0 var(--color-savings-glass-rim), inset 0 0 0 1px var(--color-savings-glass-rim-soft);
+}
+
+/* The account tabs inside the top of the card: a glass track of equal columns, and one glass lens that slides to the
+   selected tab (transform only, a little springy; none under reduced motion). --savings-tab-count and
+   --savings-tab-index are set on the track. The tabs measure the track's own width (a container query), not the
+   window's: from 47rem one line each (name left; marks, APY and Crypto's chevron right) in a pill; below it (phones,
+   narrow cards) two lines (the name, then marks and APY; Crypto's chevron beside its name and its range written
+   short, "2.79~4.57%") in a rounded rectangle; under 22rem three (the rate under the marks). */
+.arco-demo .savings-tabs { container-type: inline-size; }
+.arco-demo .savings-tabs-track {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(var(--savings-tab-count, 3), minmax(0, 1fr));
+  padding: 5px;
+  border-radius: 9999px;
+}
+.arco-demo .savings-glass-lens {
+  position: absolute;
+  top: 5px;
+  bottom: 5px;
+  left: 5px;
+  width: calc((100% - 10px) / var(--savings-tab-count, 3));
+  border-radius: 9999px;
+  pointer-events: none;
+  background: var(--color-savings-glass-lens);
+  -webkit-backdrop-filter: var(--savings-glass-lens-backdrop);
+  backdrop-filter: var(--savings-glass-lens-backdrop);
+  box-shadow:
+    inset 0 1px 0 var(--color-savings-glass-rim),
+    inset 0 0 0 1px var(--color-savings-glass-rim-soft),
+    inset 0 8px 10px -8px var(--color-savings-glass-rim),
+    inset 0 -8px 10px -8px var(--color-savings-glass-rim),
+    0 4px 14px var(--color-savings-glass-shadow);
+  transform: translateX(calc(var(--savings-tab-index, 0) * 100%));
+  transition: transform 0.5s cubic-bezier(0.3, 1.45, 0.45, 1);
+}
+.arco-demo .savings-tab {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 18px;
+  border-radius: 9999px;
+  font-size: 13px;
+  line-height: 16px;
+  text-align: left;
+}
+.arco-demo .savings-tab-name { display: flex; align-items: center; gap: 2px; white-space: nowrap; }
+.arco-demo .savings-tab-meta { display: flex; min-width: 0; align-items: center; gap: 8px; white-space: nowrap; }
+.arco-demo .savings-tab-short,
+.arco-demo .savings-tab-chevron-name { display: none; }
+@container (max-width: 46.99rem) {
+  .arco-demo .savings-tabs-track { border-radius: 22px; }
+  .arco-demo .savings-glass-lens { border-radius: 18px; }
+  .arco-demo .savings-tab {
+    height: auto;
+    min-height: 54px;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 4px;
+    padding: 8px;
+    border-radius: 18px;
+    font-size: 12px;
+  }
+  .arco-demo .savings-tab-meta { flex-wrap: wrap; gap: 2px 4px; font-size: 11px; line-height: 14px; }
+  .arco-demo .savings-tab-mark { width: 16px !important; height: 16px !important; }
+  .arco-demo .savings-tab-full,
+  .arco-demo .savings-tab-chevron-meta { display: none; }
+  .arco-demo .savings-tab-short,
+  .arco-demo .savings-tab-chevron-name { display: inline-flex; }
+}
+/* Under 22rem of track (phones narrower than about 390px) Crypto's marks and short range no longer share a line in a
+   third: on every tab the rate takes its own line under the marks, so the three read alike. */
+@container (max-width: 21.99rem) {
+  .arco-demo .savings-tab-apy { flex-basis: 100%; }
+}
+/* The Crypto menu under its tab: a stronger blur than the tabs (12px: larger radii were not applied reliably in
+   headless Chromium, where this was checked) and a mostly opaque tint (86%), so the card's text behind it does not
+   show through; the same rim and shadow. */
+.arco-demo .savings-glass-menu {
+  background: var(--color-savings-glass-menu);
+  -webkit-backdrop-filter: blur(12px) saturate(180%) brightness(1.1);
+  backdrop-filter: blur(12px) saturate(180%) brightness(1.1);
+  box-shadow:
+    inset 0 1px 0 var(--color-savings-glass-rim),
+    inset 0 0 0 1px var(--color-savings-glass-rim-soft),
+    inset 0 10px 14px -10px var(--color-savings-glass-rim),
+    0 18px 40px -8px var(--color-savings-glass-shadow),
+    0 4px 10px var(--color-savings-glass-shadow);
+}
+@media (prefers-reduced-motion: reduce) {
+  .arco-demo .savings-glass-lens { transition: none; }
+}
+
+/* Savings figures that roll digit by digit, like an odometer (RollingDigits.tsx): a digit that changes slides in from
+   below while the old one leaves through the top as the figure grows, and the other way as it shrinks. Each digit
+   sits in a slot clipped to its own box, so only the moving digits show. */
+.arco-demo .savings-digit-in-up { animation: savings-digit-in-up 0.42s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.arco-demo .savings-digit-out-up { animation: savings-digit-out-up 0.42s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.arco-demo .savings-digit-in-down { animation: savings-digit-in-down 0.42s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.arco-demo .savings-digit-out-down { animation: savings-digit-out-down 0.42s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+
+@keyframes savings-digit-in-up {
+  from { transform: translateY(100%); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+@keyframes savings-digit-out-up {
+  from { transform: translateY(0); opacity: 1; }
+  to { transform: translateY(-100%); opacity: 0; }
+}
+@keyframes savings-digit-in-down {
+  from { transform: translateY(-100%); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+@keyframes savings-digit-out-down {
+  from { transform: translateY(0); opacity: 1; }
+  to { transform: translateY(100%); opacity: 0; }
+}
+
+/* Savings card "Earning": the green dot beats like a heart, a double beat then a rest, and the first beat of each
+   sends out a halo that fades as it grows (SavingsHeroCard.tsx). */
+.arco-demo .savings-heartbeat-dot {
+  transform-origin: center;
+  animation: savings-heartbeat-dot 1.6s ease-in-out infinite;
+}
+.arco-demo .savings-heartbeat-halo {
+  transform-origin: center;
+  animation: savings-heartbeat-halo 1.6s ease-out infinite;
+}
+
+@keyframes savings-heartbeat-dot {
+  0%, 36%, 100% { transform: scale(1); }
+  9% { transform: scale(1.5); }
+  18% { transform: scale(1); }
+  27% { transform: scale(1.35); }
+}
+@keyframes savings-heartbeat-halo {
+  0% { transform: scale(1); opacity: 0.6; }
+  50%, 100% { transform: scale(3); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .arco-demo .savings-aurora-a,
+  .arco-demo .savings-aurora-b,
+  .arco-demo .savings-aurora-c,
+  .arco-demo .savings-aurora-d,
+  .arco-demo .savings-chevron,
+  .arco-demo .savings-orbit-dot,
+  .arco-demo .savings-heartbeat-dot,
+  .arco-demo .savings-heartbeat-halo,
+  .arco-demo .savings-digit-in-up,
+  .arco-demo .savings-digit-in-down { animation: none; }
+  .arco-demo .savings-digit-out-up,
+  .arco-demo .savings-digit-out-down { display: none; }
+  .arco-demo .savings-heartbeat-halo { opacity: 0; }
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Font: the /app demo (LP-portal surface) is unified on Geist. The global `*`
+   rule in index.css forces Almarai for the landing; this more-specific rule
+   (and the explicit element list) overrides it inside `.arco-demo` only — the
+   landing keeps Almarai + Instrument Serif untouched.
+   Values read precisely (`font-mono`: amounts, rates, addresses, code) are
+   Geist too, with tabular figures so digits keep one width and columns line
+   up. No system monospace (Menlo, SF Mono) anywhere in the app.
+   ────────────────────────────────────────────────────────────────────────── */
+.arco-demo,
+.arco-demo * {
+  font-family: 'Geist Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    'Roboto', sans-serif;
+}
+.arco-demo .font-mono,
+.arco-demo code,
+.arco-demo kbd,
+.arco-demo samp,
+.arco-demo pre {
+  font-family: 'Geist Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    'Roboto', sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Launch App design tokens (harness-governed).
+   These are the ONLY place raw hex is allowed for the Launch App surface — the
+   check-design-tokens hook exempts theme.css. Component code must reference these
+   via `bg-[var(--color-arco-page)]` etc., never raw hex.
+   Values map to DESIGN.md (root) and docs/DESIGN.md (launch-app token reference).
+   Scoped to .arco-demo so the landing is never affected.
+   ────────────────────────────────────────────────────────────────────────── */
+.arco-demo {
+  /* surface / text */
+  --color-arco-page: #f8f8f8;        /* page background */
+  --color-arco-page-80: rgba(248, 248, 248, 0.8); /* SectionNav sticky bg (page @ 80%) */
+  --color-arco-surface: #ffffff;     /* row / filter / card surface */
+  --color-arco-surface-30: rgba(255, 255, 255, 0.3); /* table container (surface @ 30%) */
+  --color-arco-surface-muted: #faf8f1;/* metric card / muted surface */
+  --color-arco-ink: #0f172a;         /* primary text */
+  --color-arco-ink-40: rgba(15, 23, 42, 0.4); /* row focus ring (ink @ 40%) */
+  --color-arco-text: #25272a;        /* nav / header / table-head text */
+  --color-arco-text-soft: #334155;   /* secondary body text, badge text */
+  --color-arco-muted: #7c828b;       /* placeholder / muted label */
+  /* Muted small TEXT that must pass AA: --color-arco-muted is 3.87:1 on white, below 4.5:1 for 12-13px labels. This
+     grey is 4.83:1 on --color-arco-surface and 4.6:1 on --color-arco-page (Portfolio labels, legends, sub-labels). */
+  --color-arco-muted-text: #6b7280;
+  --color-arco-on-dark: #ffffff;     /* text/icon on black CTA */
+  --color-arco-border: #e1e6f3;      /* subtle border / hairline */
+  --color-arco-cream: #e1e0cc;       /* hero / strategy text (brand-reserved) */
+  --color-arco-cream-70: rgba(225, 224, 204, 0.7); /* strategy active ring (cream @ 70%) */
+
+  /* chips / fills */
+  --color-arco-chip: #eef1f7;        /* category badge / fallback mark bg */
+  --color-arco-chip-ink: #5b6472;    /* fallback mark glyph */
+
+  /* table */
+  --color-row-saving: #e2dccb;       /* Arco Saving pinned row */
+  --color-row-hover: #3a3f4a;        /* hover overlay tint (used at low alpha) */
+  --color-row-hover-weak: rgba(58, 63, 74, 0.06); /* row hover overlay (@ 6%) */
+
+  /* strategy cards */
+  --color-strategy-treasuries: #355a52;
+  --color-strategy-credit: #1c2a49;
+  --color-strategy-saving: #5b3a5d;
+  --color-strategy-equity: #5b2f3a;      /* Equity Exposure strategy card */
+
+  /* funds-list risk tags (traffic-light tiers). Each ink on its own bg is >= 5.1:1, AA for the 11px label. */
+  --color-risk-low-bg: #d9f0e3;
+  --color-risk-low-ink: #0a6b44;
+  --color-risk-medium-bg: #fbe9c4;
+  --color-risk-medium-ink: #8a5100;
+  --color-risk-high-bg: #fbdcdc;
+  --color-risk-high-ink: #b3261e;
+
+  /* funds-list Risk profile meter (Figma 3:2): a pill of three bars, lit by tier (low 1, medium 2, high 3).
+     Figma shows the medium tier (#FFC044); low and high follow it in green and red. */
+  --color-risk-meter-line: rgba(188, 182, 239, 0.3);   /* pill border (Figma 3:3) */
+  --color-risk-meter-fill: rgba(188, 182, 239, 0.05);  /* pill fill (Figma 3:3) */
+  --color-risk-meter-off: rgba(77, 77, 110, 0.4);      /* unlit bar (Figma 3:6) */
+  --color-risk-meter-low: #2fbf71;
+  --color-risk-meter-medium: #ffc044;                  /* lit bar (Figma 3:4) */
+  --color-risk-meter-high: #f0524f;
+
+  /* Funds page: the Featured Funds card (Figma 4:148) on an espresso backdrop with a cream aurora (the brand cream,
+     #E1E0CC) and the fund's mark in a dark glass orb, and the ember-style fund rows. */
+  --color-funds-hero-1: #3a3128;                       /* espresso backdrop, top left */
+  --color-funds-hero-2: #1d1813;                       /* espresso backdrop, middle */
+  --color-funds-hero-3: #070605;                       /* espresso backdrop, bottom right */
+  --color-funds-aurora-1: rgba(225, 224, 204, 0.24);   /* aurora: cream curtain */
+  --color-funds-aurora-2: rgba(225, 224, 204, 0.12);   /* aurora: faint cream curtain */
+  --color-funds-aurora-3: rgba(225, 224, 204, 0.16);   /* aurora: cream pool, behind the metrics */
+  --color-funds-aurora-4: rgba(225, 224, 204, 0.18);   /* aurora: cream ribbon */
+  --color-funds-hero-rate: #00d395;                    /* rate figure on the card (user pick, brighter than Figma 4:193 #839F55); >= 6.5:1 on the backdrop */
+  --color-funds-hero-tile: rgba(255, 255, 255, 0.1);   /* round tile behind the fund mark (Figma 4:175) */
+  --color-funds-row-line: #e8ebf3;                     /* fund row outline */
+  --color-funds-row-hover: #f6f8fc;                    /* fund row under the pointer */
+
+  /* savings page */
+  --color-arco-savings-accent: #0bb538;  /* selected accept-asset card border (Figma #0BB538) */
+  --color-savings-on-hero-muted: rgba(255, 255, 255, 0.74); /* secondary text on the dark Savings card (>= 4.5:1 under the glow) */
+  --color-savings-on-hero-line: rgba(255, 255, 255, 0.16);  /* hairlines, outline button and grid on the dark card */
+  --color-savings-on-hero-fill: rgba(255, 255, 255, 0.08);  /* translucent panels on the dark card */
+  --color-savings-aurora-1: rgba(37, 99, 235, 0.4);         /* aurora on the dark card: azure curtain */
+  --color-savings-aurora-2: rgba(14, 165, 233, 0.16);       /* aurora: sky curtain */
+  --color-savings-aurora-3: rgba(99, 102, 241, 0.3);        /* aurora: indigo pool */
+  --color-savings-aurora-4: rgba(147, 197, 253, 0.1);       /* aurora: pale ice ribbon */
+  --color-savings-orbit-line: rgba(160, 185, 255, 0.3);     /* the three orbits on the card (look "E2b"), a bit stronger than a hairline */
+  --color-savings-orbit-dot: rgba(190, 210, 255, 0.9);      /* the glowing dot travelling each orbit, and its glow */
+  /* Liquid glass on the card (the tabs' track and lens, the slides panel, the Crypto menu): nearly clear, a bright
+     top rim, a faint side and bottom rim and a soft drop shadow. The cream and gold cards re-scope them. */
+  --color-savings-glass-tint: rgba(255, 255, 255, 0.06);     /* the glass itself (tabs track, slides panel) */
+  --color-savings-glass-rim: rgba(255, 255, 255, 0.55);      /* bright top rim highlight */
+  --color-savings-glass-rim-soft: rgba(255, 255, 255, 0.14); /* faint side and bottom rim */
+  --color-savings-glass-lens: rgba(255, 255, 255, 0.08);     /* the selected tab's lens, the menu's selected row */
+  /* What the lens does to the light behind it. On the navy card it does not brighten (the azure aurora under a
+     brightened lens took the white tab text below 4.5:1); the cream and gold cards keep the brighter lens. */
+  --savings-glass-lens-backdrop: blur(1px) saturate(140%) brightness(0.88);
+  --color-savings-glass-shadow: rgba(0, 0, 10, 0.35);        /* drop shadow */
+  --color-savings-glass-menu: rgba(20, 34, 61, 0.86);        /* the Crypto menu: navy (hero-deco-2) glass, mostly opaque */
+  /* On the Savings card, named apart so a card's look can re-scope them ([data-savings-tone="gold"] above). Each is
+     the app colour it stands for, resolved here, so re-scoping --color-arco-on-dark on a card leaves these as they are. */
+  --color-savings-hero-cta: var(--color-arco-surface);        /* Deposit button on the card */
+  --color-savings-hero-cta-ink: var(--color-arco-ink);        /* Deposit button text */
+  --color-savings-hero-cta-hover: var(--color-arco-chip);     /* Deposit button under the pointer */
+  --color-savings-hero-earning: var(--color-arco-delta-up);   /* the "Earning" pill's text and dot */
+  --color-savings-tip-text: var(--color-arco-on-dark);        /* text in the info tips' navy bubble */
+  /* The Gold card (ArcoGOLD; look "A", light gold after paxgy.com). The top left is a pale gold, not white
+     (2026-11: was #FFFDF0 / #FFF7B8, white aurora 0.75 / 0.5). Contrast on the gradient's two ends
+     (#FFF3B3 / #FFE23D): ink 14.27 / 12.34:1, muted 5.61 / 5.19:1, Deposit gold on brown 8.45:1; on a panel the
+     ends read ink 12.84 / 11.15:1, muted 5.36 / 4.98:1. Under the gold aurora's densest light and a panel the floor
+     (bottom right, unchanged) is muted 4.69:1, earning 4.61:1 (AA). #17694A fell to 4.17:1 there, so the green is
+     one step darker. */
+  --color-savings-gold-1: #fff3b3;                    /* card gradient, top left: pale gold, not white */
+  --color-savings-gold-2: #ffed8a;                    /* card gradient, 42% */
+  --color-savings-gold-3: #ffe23d;                    /* card gradient, bottom right; Deposit text; connect pill text */
+  --color-savings-gold-ink: #2e1f00;                  /* text, marks and focus rings on the gold card */
+  --color-savings-gold-muted: rgba(46, 31, 0, 0.7);   /* secondary text on the gold card (ink @ 70%) */
+  --color-savings-gold-line: rgba(46, 31, 0, 0.16);   /* hairlines, outline buttons and grid (ink @ 16%) */
+  --color-savings-gold-fill: rgba(46, 31, 0, 0.055);  /* translucent panels (ink @ 5.5%) */
+  --color-savings-gold-aurora-1: rgba(255, 255, 255, 0.3);  /* aurora: white curtain (soft, so the left stays gold) */
+  --color-savings-gold-aurora-2: rgba(191, 161, 0, 0.22);   /* aurora: gold curtain */
+  --color-savings-gold-aurora-3: rgba(255, 255, 255, 0.2);  /* aurora: white pool (soft, so the left stays gold) */
+  --color-savings-gold-aurora-4: rgba(215, 185, 0, 0.28);   /* aurora: gold ribbon */
+  --color-savings-gold-cta: #4f3900;                  /* Deposit button: brown */
+  --color-savings-gold-cta-hover: #3d2c00;            /* Deposit button under the pointer */
+  --color-savings-gold-earning: #146243;              /* "Earning" pill text and dot: dark green */
+  --color-savings-gold-orbit-line: rgba(46, 31, 0, 0.3);      /* orbits on the gold card (ink @ 30%) */
+  --color-savings-gold-orbit-dot: rgba(255, 255, 255, 0.95);  /* orbit dots on the gold card: white light */
+  --color-savings-gold-glass-tint: rgba(255, 255, 255, 0.14);   /* glass on the gold card: a white tint */
+  --color-savings-gold-glass-rim: rgba(255, 255, 255, 0.95);    /* its bright top rim */
+  --color-savings-gold-glass-rim-soft: rgba(120, 80, 0, 0.18);  /* its faint side and bottom rim (brown) */
+  --color-savings-gold-glass-lens: rgba(255, 255, 255, 0.4);    /* the selected tab's lens */
+  --color-savings-gold-glass-shadow: rgba(120, 80, 0, 0.28);    /* drop shadow (brown) */
+  --color-savings-gold-glass-menu: rgba(255, 243, 179, 0.88);   /* the Crypto menu's glass (gold-1, mostly opaque) */
+  --color-savings-tile-hatch: rgba(15, 23, 42, 0.05);       /* diagonal hatch on the Backing / Exposure tiles */
+  /* The Backing bar under the Savings card (SavingsBreakdown.tsx): its five slices, largest first, darkest first.
+     Navy by default (the chart ramp); Crypto Native and Gold re-scope them ([data-savings-bar-tone], above). */
+  --color-savings-bar-1: var(--color-arco-chart-1);
+  --color-savings-bar-2: var(--color-arco-chart-3);
+  --color-savings-bar-3: var(--color-arco-chart-5);
+  --color-savings-bar-4: var(--color-arco-chart-7);
+  --color-savings-bar-5: var(--color-arco-chart-9);
+  --color-savings-cream-bar-1: #0c0c0d;               /* Crypto Native bar: near-black to cream */
+  --color-savings-cream-bar-2: #3a3a36;
+  --color-savings-cream-bar-3: #6e6d60;
+  --color-savings-cream-bar-4: #a9a892;
+  --color-savings-cream-bar-5: #deddc8;
+  --color-savings-gold-bar-2: #6b4e00;                /* Gold bar: the gold ink (1) to pale gold */
+  --color-savings-gold-bar-3: #a67c00;
+  --color-savings-gold-bar-4: #d4a017;
+  --color-savings-gold-bar-5: #f0d47a;
+  --color-savings-earn-area: rgba(23, 147, 134, 0.14);      /* simulation earnings area (arco-up @ 14%) */
+
+  /* hero / carousel */
+  --color-arco-hero: #000000;
+  --color-arco-hero-deco-1: #2b3a55;
+  --color-arco-hero-deco-2: #14223d;
+  --color-arco-dot-active: #191d1f;
+  --color-arco-dot-inactive: rgba(25, 29, 31, 0.3);
+  --color-arco-overlay: rgba(0, 0, 0, 0.3); /* tag chip on colored card */
+
+  /* networks (brand marks) */
+  --color-network-ethereum: #627eea;
+  --color-network-xrpl: #23292f;
+  --color-network-btc: #f7931a;
+
+  /* product-detail charts (aCAPIX) — donut segment palette read from Figma
+     (node 40:3523, light→dark blue ramp) + performance line + change colors */
+  --color-arco-chart-1: #2a3e6e; /* largest segment / darkest */
+  --color-arco-chart-2: #3a5290;
+  --color-arco-chart-3: #4b649f;
+  --color-arco-chart-4: #5d75b0;
+  --color-arco-chart-5: #748ebe;
+  --color-arco-chart-6: #8ba3cc;
+  --color-arco-chart-7: #a2b8da;
+  --color-arco-chart-8: #bdcfe8;
+  --color-arco-chart-9: #d8ebfb; /* smallest segment / lightest */
+  --color-arco-chart-10: #1c2949; /* exposure bar darkest tier (Figma 7:229) */
+  --color-arco-chart-line: #0f172a;     /* performance line = ink */
+  --color-arco-chart-area: rgba(31, 42, 92, 0.12); /* area gradient top (Figma #1F2A5C) */
+  --color-arco-stock-chart-chip: rgba(29, 29, 29, 0.05);
+  --color-arco-stock-chart-grid: rgba(29, 29, 29, 0.1);
+  --color-arco-stock-chart-up: #007a4b;
+  --color-arco-up: #179386;              /* positive change (Figma) */
+  --color-arco-down: #dc2626;            /* negative change (fallback; Figma shows only positive) */
+  /* Positive change as small TEXT on light surfaces. --color-arco-up is 3.78:1 on #fff, below AA 4.5:1 for 14px text;
+     this is the Figma Ondo up colour: 5.40:1 on --color-arco-surface, 5.09:1 on --color-arco-page and 4.87:1 under the
+     6% --color-row-hover-weak overlay. Graphics (sparklines, status dots) keep --color-arco-up (non-text, >= 3:1). */
+  --color-arco-up-text: #007a4b;
+  /* Portfolio "Your potential earnings": the soft green strip under the what-if line ("… of ArcoUSD is not earning.").
+     Ink on it is 16.45:1; --color-arco-up-text on it 4.98:1. */
+  --color-portfolio-what-if-soft: #f1f7f4;
+  /* Holdings "Price/24hΔ" gain/loss pair. Deliberately NOT --color-arco-up/down: those two also
+     carry success/error meaning across the app (checkmarks, FRESH/STALE, paused, form errors),
+     so recolouring them would leak this change into ~60 unrelated call sites. */
+  --color-arco-delta-up: #3ce3ab;        /* 24h change >= 0, including exactly 0% */
+  --color-arco-delta-down: #f23674;      /* 24h change < 0 */
+
+  /* radius */
+  --radius-control: 5px;   /* filter inputs */
+  --radius-card: 8px;      /* carousel / table container / metric */
+  --radius-row: 10px;      /* table rows */
+  --radius-strategy: 12px; /* strategy cards / detail cards */
+  --radius-pill: 9999px;   /* badges / chips */
+  --radius-funds-hero: 24px; /* Featured Funds card (Figma 4:156) */
+  --radius-funds-row: 20px;  /* ember-style fund rows */
+
+  /* shadows */
+  --shadow-control: 0 0 0 0.5px var(--color-arco-border);
+  --shadow-savings-card: 0 1px 2px rgba(16, 16, 20, 0.05); /* accept-asset selector card (Figma) */
+  --shadow-table: 0 3px 4px rgba(0, 0, 0, 0.25);
+  --shadow-savings-popover: 0 12px 32px rgba(16, 16, 20, 0.12), 0 0 0 0.5px var(--color-arco-border); /* Backing tile detail card */
+
+  /* containers */
+  --container-page: 1200px;
+  --container-header: 1400px;
+}
