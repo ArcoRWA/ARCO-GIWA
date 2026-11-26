@@ -9,8 +9,6 @@ import {
   liveSavingsHistory,
   liveSavingsMarket,
   liveSavingsOwnLiquidity,
-  liveSavingsVault,
-  REPLACED_SAVINGS_PRODUCT_ID,
 } from "./arcousd-live"
 import { ArcoUsdLiveContext, ArcoUsdLiveFailedContext, ArcoUsdLivePendingContext } from "./arcousd-live-context"
 import {
@@ -19,8 +17,6 @@ import {
   goldQuoteShares,
   goldSavingsMarket,
   goldSavingsRoutes,
-  goldSavingsVault,
-  withGoldAccounts,
   withInstantCoins,
   type ArcoGoldLive,
 } from "./arcogold-live"
@@ -32,7 +28,8 @@ import { GIWA_CHAIN_ID, GIWA_LIVE_REFETCH } from "./config"
 import { readShareSupply, readTokenBalance, readZapRedeemQuote } from "./contracts"
 import { SavingsSkeleton } from "./GiwaSkeleton"
 import { marketApyPercent, marketApyText } from "./price-policy"
-import { buildSavingsAccounts, resolveSavingsSelection, type SavingsAccount } from "./savings"
+import { resolveSavingsSelection, type SavingsAccount } from "./savings"
+import { savingsPageAccounts } from "./savings-page-accounts"
 import { SavingsAccordion } from "./SavingsAccordion"
 import { BackingBar, BackingBreakdown, LiquidityBreakdown } from "./SavingsBreakdown"
 import { withBandedApy, withSeededApy } from "./savings-apy-seed"
@@ -67,27 +64,16 @@ export default function GiwaSavingsPage() {
   const live = useContext(ArcoUsdLiveContext)
   const livePending = useContext(ArcoUsdLivePendingContext)
   const liveFailed = useContext(ArcoUsdLiveFailedContext)
-  const liveVault = useMemo(() => {
-    const base = (catalogQuery.data ?? []).find((product) => product.productId === REPLACED_SAVINGS_PRODUCT_ID)
-    return live !== null && base !== undefined ? liveSavingsVault(base, live) : null
-  }, [live, catalogQuery.data])
-
-  // Ordered account list (pinned → AUM desc → intra-vault index); dummies kept disabled, dangling reals skipped.
-  // Pure + unit-tested in savings.ts.
-  const accounts = useMemo(() => {
-    const built = buildSavingsAccounts(catalogQuery.data ?? [], marketQuery.data ?? [])
-    if (liveVault === null || live?.savings == null) return built
-    const apy = marketApyText(liveSavingsMarket(live.savings))
-    return built.map((account) => (account.vault?.productId === REPLACED_SAVINGS_PRODUCT_ID ? { ...account, vault: liveVault, apy } : account))
-  }, [catalogQuery.data, marketQuery.data, liveVault, live])
   // The gold account on the live ArcoGOLD contracts (arcogold-live.ts): made from the gold deployment, in the place of
   // any gold coin the Vault Config lists. Absent (not deployed, or not read) the list is as built.
   const gold = useContext(ArcoGoldLiveContext)
   const goldPending = useContext(ArcoGoldLivePendingContext)
-  const goldVault = useMemo(() => (gold !== null ? goldSavingsVault(gold) : null), [gold])
+  // The accounts on offer (savings-page-accounts.ts, shared with the header search): the Vault Config's, ordered
+  // (pinned → AUM desc → intra-vault index; dummies kept disabled, dangling reals skipped), with sArcoUSD and ArcoGOLD
+  // in their places when they are live.
   const withGold = useMemo(
-    () => withGoldAccounts(accounts, goldVault, gold, gold !== null ? marketApyText(goldSavingsMarket(gold)) : "—"),
-    [accounts, goldVault, gold],
+    () => savingsPageAccounts({ catalog: catalogQuery.data ?? [], market: marketQuery.data ?? [], live, gold }),
+    [catalogQuery.data, marketQuery.data, live, gold],
   )
   const [searchParams, setSearchParams] = useSearchParams()
   const category = savingsCategoryFromSearch(searchParams)

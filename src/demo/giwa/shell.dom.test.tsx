@@ -295,7 +295,8 @@ test("investor shell DOM (set GIWA_HOST_DOM_RUNTIME to an existing jsdom package
     const converter = { option: "usdc-giwa", token: "0x0000000000000000000000000000000000000010", converter: "0x0000000000000000000000000000000000000020" } as const
     const m = await mount("/savings", { token: "0x00000000000000000000000000000000000000a1", priceFeed: "0x00000000000000000000000000000000000000a2", converters: [converter] })
     assert.equal(m.element.querySelector("header")!.textContent?.includes("Get ArcoUSD"), false, "the top bar's button is gone")
-    assert.equal(m.element.querySelector("header")!.querySelector("button[aria-haspopup=\"dialog\"]"), null)
+    // (The header's only dialog triggers are the search's.)
+    assert.equal(m.element.querySelector("header")!.querySelector("button[aria-haspopup=\"dialog\"]:not([aria-label^=\"Search \"])"), null)
     const inRail = m.rail().querySelector<HTMLButtonElement>('button[aria-label="Convert to ArcoUSD"]')!
     assert.ok(inRail)
     assert.equal(inRail.textContent, "Convert")
@@ -324,6 +325,29 @@ test("investor shell DOM (set GIWA_HOST_DOM_RUNTIME to an existing jsdom package
     }
     assert.ok(screen, "Get ArcoUSD's Convert screen opens, as the top bar button did")
     assert.equal(m.probe.pathname, "/savings", "no navigation")
+    await m.unmount()
+  })
+
+  await t.test("search palette: its Convert action opens Get ArcoUSD's screen, as the rail's Convert does", async () => {
+    const converter = { option: "usdc-giwa", token: "0x0000000000000000000000000000000000000010", converter: "0x0000000000000000000000000000000000000020" } as const
+    const m = await mount("/portfolio", { token: "0x00000000000000000000000000000000000000a1", priceFeed: "0x00000000000000000000000000000000000000a2", converters: [converter] })
+    const field = m.element.querySelector<HTMLButtonElement>('header button[aria-keyshortcuts="/"]')!
+    assert.ok(field, "the top bar's search field")
+    await act(async () => { field.click(); await flush() })
+    const palette = document.querySelector('[role="dialog"][aria-label="Search"]')!
+    assert.ok(palette)
+    const convert = palette.querySelector<HTMLButtonElement>('[data-row="action:convert"]')!
+    assert.equal(convert.tagName, "BUTTON")
+    assert.match(convert.textContent!, /^ConvertSwap stablecoins and ArcoUSD$/)
+    await act(async () => { convert.click(); await flush() })
+    assert.equal(document.querySelector('[role="dialog"][aria-label="Search"]'), null, "the palette closes")
+    let screen: Element | null = null
+    for (let i = 0; i < 50 && !screen; i++) {
+      await act(async () => { await sleep(40); await flush() })
+      screen = [...document.querySelectorAll('[role="dialog"]')].find(node => node.textContent?.includes("Convert")) ?? null
+    }
+    assert.ok(screen, "Get ArcoUSD's Convert screen opens")
+    assert.equal(m.probe.pathname, "/portfolio", "no navigation")
     await m.unmount()
   })
 })

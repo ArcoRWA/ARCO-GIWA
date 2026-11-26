@@ -10,7 +10,8 @@ import { GiwaWalletProvider } from "./wallet"
 import { categoryTitle } from "./fund-categories"
 import { breakdownRows, listedFundPortfolio } from "./listed-fund-portfolio"
 import { DEPLOYED_FUND_METRICS, LISTED_FUNDS, formatAsOf, listedFundById, listedFundsForCatalog, metricCaption, type FundBreakdown } from "./listed-funds"
-import { buildSearchProducts } from "./product-search"
+import { FUNDS_LINEUP } from "./funds-lineup"
+import { fundItems } from "./product-search"
 import { vaultCategoryRisk } from "./RiskTag"
 import snapshot from "./investor-shell/verification/deployed-giwa.snapshot.json"
 import type { GiwaCatalogItem } from "./types"
@@ -138,11 +139,11 @@ test("deployed vaults take the latest dated rates from DigiFT and the fund deck"
   assert.equal(formatAsOf("soon"), "soon")
 })
 
-test("search lists the nine funds and no aCAPIX", () => {
-  const funds = buildSearchProducts(catalog, [], []).filter((product) => product.category === "Funds")
-  assert.deepEqual(funds.map((product) => product.symbol), ["bEQTY", "auMINT", "aiBENJI", "RRDY", "CMBBOND", "HOME", "JX", "kTW50", "PPLUS"])
-  assert.equal(funds.find((product) => product.symbol === "HOME")?.href, "/product/nuva-home")
-  assert.equal(funds.find((product) => product.symbol === "auMINT")?.value, "3.55% 7-day yield")
+test("search lists the Funds page's lineup and nothing else (no aCAPIX)", () => {
+  const funds = fundItems(FUNDS_LINEUP)
+  assert.deepEqual(funds.map((product) => product.title), ["HOME", "JX", "PPLUS"])
+  assert.deepEqual(funds.find((product) => product.title === "HOME")?.target, { kind: "link", href: "/product/nuva-home" })
+  assert.equal(funds.find((product) => product.title === "PPLUS")?.valueLabel, "30-day avg. APY")
 })
 
 test("every listed fund page has the deployed page's sections and a Coming soon panel", () => {
