@@ -920,13 +920,14 @@ function QueueView({
 }
 
 /** The keeper bot (docs/operations/arcousd-keeper.md): mode, wallet, gas, what it would pay now, its
- *  Savings distribution step, its last transaction. */
+ *  Savings and ArcoGOLD distribution steps, its last transaction. */
 export function KeeperCard({ keeper, loading, error, now = Date.now() }: KeeperProps & { now?: number }) {
   const state = keeper?.keeper ?? null
   const report = state?.report ?? null
   const badge = keeperBadge(state, now)
   const holding = report?.holdUntil && Date.parse(report.holdUntil) > now ? report.holdUntil : null
   const distributeHolding = report?.distributeHoldUntil && Date.parse(report.distributeHoldUntil) > now ? report.distributeHoldUntil : null
+  const goldHolding = report?.goldDistributeHoldUntil && Date.parse(report.goldDistributeHoldUntil) > now ? report.goldDistributeHoldUntil : null
   const running = report && report.mode !== "off"
   return (
     <Card>
@@ -963,6 +964,10 @@ export function KeeperCard({ keeper, loading, error, now = Date.now() }: KeeperP
               <Row label="Savings" value={<span className="break-words">{keeperDistributeText(report!.distribute, now)}</span>} attention={report!.distribute?.state === "error"} />
             )}
             {distributeHolding && <Row label="Savings held" value={`until ${timeText(distributeHolding)} (after a reverted distribute())`} attention />}
+            {report!.goldDistribute !== undefined && (
+              <Row label="Gold" value={<span className="break-words">{keeperDistributeText(report!.goldDistribute, now, "gold")}</span>} attention={report!.goldDistribute?.state === "error"} />
+            )}
+            {goldHolding && <Row label="Gold held" value={`until ${timeText(goldHolding)} (after a reverted distribute())`} attention />}
             <Row
               label="Last transaction"
               value={

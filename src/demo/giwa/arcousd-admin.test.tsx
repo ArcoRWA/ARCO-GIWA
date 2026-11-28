@@ -637,6 +637,40 @@ test("keeper bot: its Savings step in words, a distribute transaction, and a dis
   assert.match(text(failing), /Savings Could not check: socket hang up/)
 })
 
+test("keeper bot: its ArcoGOLD step in ounces, not dollars; reports without it show no Gold row", () => {
+  const step = (state: NonNullable<GiwaArcoUSDKeeperReport["distribute"]>["state"], over: Partial<NonNullable<GiwaArcoUSDKeeperReport["distribute"]>> = {}) => ({
+    state,
+    nextAt: "2026-10-20T11:00:00.000Z",
+    amountUsd: "0.00834567",
+    detail: null,
+    ...over,
+  })
+  assert.equal(keeperDistributeText(null, NOW, "gold"), "Not checked this round")
+  assert.equal(keeperDistributeText(step("waiting"), NOW, "gold"), "Due in 23h 0m · 0.0083 oz accrued")
+  assert.equal(keeperDistributeText(step("off"), NOW, "gold"), "Off (ARCOUSD_KEEPER_DISTRIBUTE=off): distribute from the Gold page")
+  assert.equal(keeperDistributeText(step("not-deployed"), NOW, "gold"), "ArcoGOLD has no distributor")
+  assert.equal(keeperDistributeText(step("nothing"), NOW, "gold"), "Due, nothing to distribute now (under 0.00001 oz)")
+  assert.equal(keeperDistributeText(step("sent", { detail: "Distributed", amountUsd: "0.0125" }), NOW, "gold"), "Distributed 0.0125 oz")
+  assert.equal(keeperDistributeText(step("ready", { detail: "Dry run: would distribute" }), NOW, "gold"), "Dry run: would distribute: 0.0083 oz")
+
+  const goldTx = { hash: `0x${"cd".repeat(32)}`, action: "distribute" as const, symbol: "ArcoGOLD", nonce: 14, sentAt: "2026-10-19T11:58:00.000Z", status: "success" as const, paid: null, amountUsd: "0.0125", blockNumber: "902", error: null }
+  assert.equal(keeperTxText(goldTx), "ArcoGOLD distribute · 0.0125 oz")
+
+  const card = text(
+    renderToStaticMarkup(
+      <KeeperCard
+        keeper={keeper(keeperReport({ lastTx: goldTx, goldDistribute: step("waiting"), goldDistributeHoldUntil: "2026-10-19T12:08:00.000Z" }))}
+        now={NOW}
+      />,
+    ),
+  )
+  for (const expected of ["Gold Due in 23h 0m · 0.0083 oz accrued", "Mined ArcoGOLD distribute · 0.0125 oz · 2m ago"]) assert.ok(card.includes(expected), expected)
+  assert.match(card, /Gold held until .* \(after a reverted distribute\(\)\)/)
+  assert.doesNotMatch(card, /\$0\.01/)
+  const old = text(renderToStaticMarkup(<KeeperCard keeper={keeper(keeperReport())} now={NOW} />))
+  assert.doesNotMatch(old, /Gold/)
+})
+
 // ─────────────────────────────── Savings ───────────────────────────────
 
 const SAVINGS_NOW = Date.parse("2026-10-21T12:00:00.000Z")

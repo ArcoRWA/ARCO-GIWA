@@ -419,6 +419,6 @@ test("application owns a single provider above route branches and leaves legacy 
   assert.match(main, /<GiwaPreprodProviders><RouterProvider router=\{router\} \/><\/GiwaPreprodProviders>/)
   assert.doesNotMatch(layout, /GiwaPreprodProviders/)
   assert.match(main, /<RequireGiwaAdmin><GiwaAdminLayout \/><\/RequireGiwaAdmin>/)
-  assert.match(providers, /<DynamicGiwaWalletProvider><GiwaStocksHost>/)
-  assert.match(providers, /<GiwaWalletProvider><GiwaStocksHost>/)
+  assert.match(providers, /<DynamicGiwaWalletProvider><GiwaStocksHost maxSessionMs={stocksSessionMaxMs}>/)
+  assert.match(providers, /<GiwaWalletProvider><GiwaStocksHost maxSessionMs={stocksSessionMaxMs}>/)
 })

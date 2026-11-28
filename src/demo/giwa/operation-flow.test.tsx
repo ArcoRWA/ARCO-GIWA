@@ -6,7 +6,9 @@ import {
   initialOperationSteps,
   operationFlowView,
   operationResultMessage,
+  NETWORK_SWITCH_LINE,
   runOperationFlow,
+  type NetworkOutcome,
   type OperationFlow,
   type OperationOutcome,
   type OperationReview,
@@ -171,4 +173,59 @@ test("each operation's words: withdrawal, redemption and requests", () => {
   const failed = operationFlowView(flowOf(FUNDS, { outcome: { kind: "failed", message: "User rejected the request." } }))
   assert.equal(failed.error, "User rejected the request.")
   assert.equal(failed.result, null)
+})
+
+// ── a wallet on another network: every action switches first (ensureGiwa), then carries on in the same press ──────────
+
+function networkDriver(options: { network: NetworkOutcome; approve?: StepOutcome | null }) {
+  const calls: string[] = []
+  let outcome: OperationOutcome | null = null
+  const run = runOperationFlow({
+    ensureNetwork: async () => {
+      calls.push("wallet:switch")
+      return options.network
+    },
+    network: (pending) => calls.push(`network:${pending ? "pending" : "done"}`),
+    approve: options.approve ? async (onSent) => { calls.push("wallet:approve"); onSent(); return options.approve! } : null,
+    submit: async (onSent) => { calls.push("wallet:submit"); onSent(); return { ok: true, hash: "0xb" } },
+    stopped: () => false,
+    step: (id, state) => calls.push(`${id}:${state}`),
+    finish: (next) => { outcome = next; calls.push(`finish:${next.kind}`) },
+    requested: false,
+  })
+  return { run, calls, outcome: () => outcome }
+}
+
+test("another network: the switch first, then the approval and the operation in the same press", async () => {
+  const withApproval = networkDriver({ network: { ok: true }, approve: { ok: true, hash: "0xa" } })
+  await withApproval.run
+  assert.deepEqual(withApproval.calls.slice(0, 4), ["network:pending", "wallet:switch", "network:done", "wallet:approve"])
+  assert.ok(withApproval.calls.includes("wallet:submit"))
+  assert.deepEqual(withApproval.outcome(), { kind: "success", hash: "0xb", received: null })
+  const direct = networkDriver({ network: { ok: true } })
+  await direct.run
+  assert.deepEqual(direct.calls.slice(0, 4), ["network:pending", "wallet:switch", "network:done", "wallet:submit"])
+})
+
+test("a rejected or failed switch ends the flow at its first step with the message, and sends nothing", async () => {
+  for (const message of ["Network switch was rejected.", "Could not switch network: boom"]) {
+    const refused = networkDriver({ network: { ok: false, message }, approve: { ok: true, hash: "0xa" } })
+    await refused.run
+    assert.deepEqual(refused.calls, ["network:pending", "wallet:switch", "network:done", "approve:failed", "finish:failed"])
+    assert.deepEqual(refused.outcome(), { kind: "failed", message })
+    const direct = networkDriver({ network: { ok: false, message } })
+    await direct.run
+    assert.ok(!direct.calls.includes("wallet:submit"), "the operation is never sent")
+    assert.deepEqual(direct.calls.slice(-2), ["submit:failed", "finish:failed"])
+  }
+})
+
+test("while the wallet has the switch, the first step's wallet line asks to approve it; then its own line", () => {
+  const flow: OperationFlow = { id: 1, review: SAVINGS, steps: initialOperationSteps(true), outcome: null, open: true, switchingNetwork: true }
+  assert.equal(NETWORK_SWITCH_LINE, "Approve the network switch in your wallet app.")
+  assert.equal(operationFlowView(flow).steps[0]!.walletLabel, NETWORK_SWITCH_LINE)
+  assert.equal(operationFlowView({ ...flow, switchingNetwork: false }).steps[0]!.walletLabel, "Approve USDC in your wallet")
+  const direct: OperationFlow = { ...flow, steps: initialOperationSteps(false) }
+  assert.equal(operationFlowView(direct).steps[0]!.walletLabel, NETWORK_SWITCH_LINE)
+  assert.equal(operationFlowView({ ...direct, switchingNetwork: false }).steps[0]!.walletLabel, "Confirm deposit in your wallet")
 })

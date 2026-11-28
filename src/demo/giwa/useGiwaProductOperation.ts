@@ -21,13 +21,14 @@ import {
 import { pauseStateOf } from "./catalog"
 import { fundBuyRoute, fundPayChoices, isFundProduct, RESERVE_REFILL_NOTICE, selectedPayAsset, type FundBuyRoute } from "./arcousd-buy"
 import { withdrawalApproval } from "./arcousd-live"
-import { GIWA_LIVE_REFETCH } from "./config"
+import { GIWA_CHAIN_ID, GIWA_LIVE_REFETCH } from "./config"
 import { vaultAddressForOperation, type ProductOperation } from "./operation-routing"
 import {
   displayAmount,
   initialOperationSteps,
   isRequestOperation,
   runOperationFlow,
+  type NetworkOutcome,
   type OperationFlow,
   type OperationReview,
   type StepOutcome,
@@ -35,6 +36,7 @@ import {
 import { fromAnswer } from "./price-policy"
 import type { GiwaCatalogItem, HexAddress, UiPhase } from "./types"
 import { useGiwaWallet } from "./wallet"
+import { useEnsureGiwa } from "./wallet-network"
 
 const DEFAULT_OPERATION: ProductOperation = "deposit"
 
@@ -72,6 +74,12 @@ function requiredAddress(value: HexAddress | null | undefined, label: string): H
 // which runs the approval when needed and then the operation; the panel keeps its INLINE status
 // (error / successLabel / txHashes) as well.
 export function useGiwaProductOperation(product: GiwaCatalogItem) {
+  const ensureGiwa = useEnsureGiwa()
+  // Writes go out only with the wallet on GIWA: the switch (and its wait) first, the result as a step outcome.
+  const ensureNetwork = async (): Promise<NetworkOutcome> => {
+    const result = await ensureGiwa()
+    return result.ok ? { ok: true } : { ok: false, message: result.message }
+  }
   const wallet = useGiwaWallet()
   const queryClient = useQueryClient()
   const [amount, setAmount] = useState("1")
@@ -196,10 +204,14 @@ export function useGiwaProductOperation(product: GiwaCatalogItem) {
   // step the buy may need.
   const allowanceUnknown = Boolean(approvalNeeded && wallet.address && approvalToken && approvalSpender && allowanceQuery.data === undefined)
 
+  // Another network is no reason to hold the action back: pressing it switches first (ensureGiwa). Gas is read from
+  // GIWA through the app's own RPC, whatever chain the wallet is on.
   const phase: UiPhase =
-    wallet.phase === "disconnected" || wallet.phase === "wrong-network" || wallet.phase === "missing-gas"
-      ? wallet.phase
-      : !product.paymentAssetAddress || !product.paymentAsset
+    !wallet.address
+      ? "disconnected"
+      : wallet.nativeBalance === "0"
+        ? "missing-gas"
+        : !product.paymentAssetAddress || !product.paymentAsset
         ? "missing-payment-token"
         : usesPaymentAmount && routeUnknown && operationPhase === "ready"
           ? "loading-registry"
@@ -419,6 +431,8 @@ export function useGiwaProductOperation(product: GiwaCatalogItem) {
     const withApproval = (allowanceRequired || allowanceUnknown) && (buying || withdrawalApproval(product, review.operation) !== null)
     setFlow({ id, review, steps: initialOperationSteps(withApproval), outcome: null, open: true })
     void runOperationFlow({
+      ensureNetwork,
+      network: (pending) => updateFlow(id, (current) => ({ ...current, switchingNetwork: pending })),
       approve: withApproval ? (onSent) => approveDepositVault(onSent) : null,
       submit: (onSent) => submitOperation(review.operation, requestId, onSent),
       stopped: () => closedFlow.current === id,
@@ -455,10 +469,26 @@ export function useGiwaProductOperation(product: GiwaCatalogItem) {
     startFlow(flow.review)
   }
 
+  // Every wallet write outside the modal (a claim, the panel's own approve / submit buttons) switches to GIWA first too:
+  // the panel's busy state shows while the wallet has the switch; a rejection shows as the panel's error, nothing sent.
+  async function onGiwa(run: () => Promise<StepOutcome>): Promise<StepOutcome> {
+    if (wallet.address && wallet.chainId !== GIWA_CHAIN_ID) {
+      setOperationError(null)
+      setOperationPhase("submitting")
+    }
+    const network = await ensureNetwork()
+    if (!network.ok) {
+      setOperationPhase("failed")
+      setOperationError(network.message)
+      return network
+    }
+    return run()
+  }
+
   function claimRedemption(nextRequestId: string) {
     setOperation("claimRedeem")
     setRequestId(nextRequestId)
-    void submitOperation("claimRedeem", nextRequestId)
+    void onGiwa(() => submitOperation("claimRedeem", nextRequestId))
   }
 
   return {
@@ -514,14 +544,15 @@ export function useGiwaProductOperation(product: GiwaCatalogItem) {
     },
     onAmountChange: setAmount,
     onRequestIdChange: setRequestId,
-    onApprove: () => void approveDepositVault(),
-    onSubmit: () => void submitOperation(),
+    onApprove: () => void onGiwa(() => approveDepositVault()),
+    onSubmit: () => void onGiwa(() => submitOperation()),
     // Redeem fallback: when instant liquidity can't cover the payout, the panel routes here
     // to submit a redemption REQUEST instead of reverting. On the redeem tab `amountBase` is
     // already 18-dec shares, so requestRedeem receives the correct sharesIn.
-    onRequestRedeem: () => void submitOperation("requestRedeem"),
+    onRequestRedeem: () => void onGiwa(() => submitOperation("requestRedeem")),
     onClaim: claimRedemption,
     onConnect: () => void wallet.connect(),
-    onSwitchNetwork: () => void wallet.switchToGiwa(),
+    // The panels' own "switch" branch (a wallet phase the hook no longer reports) goes through the same helper.
+    onSwitchNetwork: () => void ensureNetwork(),
   }
 }

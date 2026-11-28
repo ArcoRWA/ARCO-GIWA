@@ -18,6 +18,8 @@ export type StocksHostValue = {
   /** The host's active wallet view: address, chain, connection epoch and the provider tree's active source object. */
   wallet: WalletSourceView
   signIn(): Promise<void>
+  /** Sign in again while signed in; the current session stays until the new one is verified. True when renewed. */
+  renew(): Promise<boolean>
   logout(): void
   /** Capture the request's session ID before sending it. Never read a new ID after a 401. */
   invalidate(sessionId: string): void
@@ -73,6 +75,7 @@ export function StocksHostProvider({ context, dependencies, signingReady = true,
     walletStatus,
     wallet,
     async signIn() { if (walletStatus === "ready") await controller?.signIn() },
+    async renew() { return walletStatus === "ready" && controller ? (await controller.renew()) !== null : false },
     logout() { controller?.logout() },
     invalidate(sessionId) { controller?.invalidate(sessionId) },
   }), [controller, visible, walletStatus, wallet])

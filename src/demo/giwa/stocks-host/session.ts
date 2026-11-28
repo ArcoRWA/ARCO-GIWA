@@ -28,9 +28,14 @@ export type HostDependencies = {
   setTimer?: (callback: () => void, delay: number) => unknown
   clearTimer?: (timer: unknown) => void
   httpTimeoutMs?: number
+  /**
+   * Longest session this host accepts, in ms (default 900_000, the customer app's 15 minutes). The admin
+   * console passes 3_600_000. The session still ends at the token's `exp` / the server's `expiresIn`.
+   */
+  maxSessionMs?: number
 }
 type Scope = { key: string; wallet: Address | null; chain: number | null; origin: string; domain: string; api: string }
-type Attempt = { generation: number; abort: AbortController; scope: Scope; promise?: Promise<HostSession | null> }
+type Attempt = { generation: number; abort: AbortController; scope: Scope; promise?: Promise<HostSession | null>; renewal?: boolean }
 const OUT: HostSnapshot = Object.freeze({ status: "signed-out", session: null, error: null })
 class AuthError extends Error {}
 function ensure(value: unknown, code: string): asserts value { if (!value) throw new AuthError(code) }
@@ -63,6 +68,9 @@ export function createStocksHostSession(initial: HostContext, dependencies: Host
   const clearTimer = dependencies.clearTimer ?? (timer => clearTimeout(timer as ReturnType<typeof setTimeout>))
   const timeout = dependencies.httpTimeoutMs ?? 15_000
   ensure(Number.isFinite(timeout) && timeout > 0 && timeout <= 60_000, "INVALID_AUTH_TIMEOUT")
+  const maxMs = dependencies.maxSessionMs ?? 900_000
+  ensure(Number.isInteger(maxMs) && maxMs % 1000 === 0 && maxMs >= 60_000 && maxMs <= 3_600_000, "INVALID_SESSION_LIMIT")
+  const maxSeconds = maxMs / 1000
   let scope = scopeOf(initial)
   let generation = 0
   let disposed = false
@@ -143,7 +151,7 @@ export function createStocksHostSession(initial: HostContext, dependencies: Host
       const nonceExpiry = Date.parse(nonce.expiresAt)
       const issued = now()
       ensure(Number.isFinite(issued) && Number.isFinite(nonceExpiry) && nonceExpiry > issued, "NONCE_EXPIRED")
-      const deadline = Math.min(nonceExpiry, issued + 900_000)
+      const deadline = Math.min(nonceExpiry, issued + maxMs)
       const message = createSiweMessage({
         address: own.wallet, chainId: 91342, domain: own.domain, uri: own.origin,
         version: "1", nonce: nonce.nonce, issuedAt: new Date(issued), expirationTime: new Date(deadline),
@@ -155,15 +163,17 @@ export function createStocksHostSession(initial: HostContext, dependencies: Host
       const response = await post(attempt, "/api/v1/auth/verify", { message, signature }, deadline)
       check(attempt)
       ensure(typeof response.walletAddress === "string" && response.walletAddress.toLowerCase() === own.wallet.toLowerCase() && response.chainId === 91342, "INVALID_AUTH_RESPONSE")
-      ensure(typeof response.token === "string" && typeof response.expiresIn === "number" && Number.isInteger(response.expiresIn) && response.expiresIn > 0 && response.expiresIn <= 900, "INVALID_AUTH_RESPONSE")
+      ensure(typeof response.token === "string" && typeof response.expiresIn === "number" && Number.isInteger(response.expiresIn) && response.expiresIn > 0 && response.expiresIn <= maxSeconds, "INVALID_AUTH_RESPONSE")
       const claims = jwtClaims(response.token)
       const time = now()
       ensure(typeof claims.sub === "string" && isAddress(claims.sub) && claims.sub.toLowerCase() === own.wallet.toLowerCase() && claims.chainId === 91342 && claims.domain === own.domain, "INVALID_AUTH_RESPONSE")
       ensure(typeof claims.iat === "number" && Number.isInteger(claims.iat) && typeof claims.exp === "number" && Number.isInteger(claims.exp), "INVALID_AUTH_RESPONSE")
-      ensure(claims.iat * 1000 <= time + 5000 && time - claims.iat * 1000 <= 900_000 && claims.exp > claims.iat && claims.exp - claims.iat <= 900, "INVALID_AUTH_RESPONSE")
+      ensure(claims.iat * 1000 <= time + 5000 && time - claims.iat * 1000 <= maxMs && claims.exp > claims.iat && claims.exp - claims.iat <= maxSeconds, "INVALID_AUTH_RESPONSE")
       const expiresAt = Math.min(claims.exp * 1000, verifiedAt + response.expiresIn * 1000)
       ensure(Number.isFinite(time) && time >= verifiedAt && time < expiresAt, "SESSION_EXPIRED")
       const session: HostSession = Object.freeze({ id: `${instanceId}:${attempt.generation}`, walletAddress: own.wallet, chainId: 91342, accessToken: response.token, createdAt: time, expiresAt })
+      // A renewal replaces the previous session's timer only now, when its replacement is published.
+      if (expiryTimer !== undefined) clearTimer(expiryTimer)
       expiryTimer = setTimer(() => { fresh() }, expiresAt - time)
       publish({ status: "authenticated", session, error: null })
       check(attempt)
@@ -173,10 +183,22 @@ export function createStocksHostSession(initial: HostContext, dependencies: Host
       // attempt is not. Only the former may publish a failure to this session.
       if (!disposed && active === attempt && generation === attempt.generation) {
         attempt.abort.abort()
+        // A failed renewal leaves the current session as it is, until it expires.
+        if (attempt.renewal && snapshot.session && snapshot.status === "authenticated") return null
         publish({ status: "error", session: null, error: error instanceof AuthError ? error.message : error instanceof WalletSignInError ? error.code : "SIGN_IN_FAILED" })
       }
       return null
     } finally { if (active === attempt) active = null }
+  }
+  function signIn(): Promise<HostSession | null> {
+    if (disposed || invalidContext) return Promise.resolve(null)
+    if (active?.promise) return active.promise
+    cancel()
+    const attempt: Attempt = { generation, abort: new AbortController(), scope }
+    active = attempt
+    attempt.promise = Promise.resolve().then(() => run(attempt))
+    publish({ status: "signing-in", session: null, error: null })
+    return attempt.promise
   }
   return {
     getSnapshot: () => fresh(),
@@ -188,14 +210,21 @@ export function createStocksHostSession(initial: HostContext, dependencies: Host
       invalidContext = false
       if (scope.key !== next.key) { cancel(); scope = next; publish(OUT) }
     },
-    signIn(): Promise<HostSession | null> {
+    signIn,
+    /**
+     * Sign in again while signed in (the same SIWE flow), without dropping the current session: it
+     * stays published while the wallet signs, and is replaced only by a new verified session (new ID).
+     * A rejected or failed signature leaves the current session until it expires. Signed out: signIn().
+     */
+    renew(): Promise<HostSession | null> {
       if (disposed || invalidContext) return Promise.resolve(null)
       if (active?.promise) return active.promise
-      cancel()
-      const attempt: Attempt = { generation, abort: new AbortController(), scope }
+      if (!fresh().session || snapshot.status !== "authenticated") return signIn()
+      // A new generation (so a new session ID), but the current session and its expiry timer stay.
+      generation++
+      const attempt: Attempt = { generation, abort: new AbortController(), scope, renewal: true }
       active = attempt
       attempt.promise = Promise.resolve().then(() => run(attempt))
-      publish({ status: "signing-in", session: null, error: null })
       return attempt.promise
     },
     logout() { cancel(); publish(OUT) },

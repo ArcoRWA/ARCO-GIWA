@@ -2,6 +2,10 @@ import type { ReactNode } from "react"
 import { NavLink } from "react-router-dom"
 import { KeyRound, Loader2, LogOut, Network, ShieldAlert, ShieldOff, Wallet, X } from "lucide-react"
 import {
+  accessRoles,
+  ADMIN_SESSION_MAX_MS,
+  inExtendWindow,
+  minutesLeft,
   READ_ONLY_VAULT_REASON,
   signInFailureText,
   visibleNav,
@@ -23,10 +27,20 @@ export function shortAddress(address: string): string {
   return address.length > 12 ? `${address.slice(0, 6)}…${address.slice(-4)}` : address
 }
 
-/** "14:05 UTC": locale-independent, so every operator reads the same time. */
-export function formatClockUtc(ms: number): string {
-  return Number.isFinite(ms) ? `${new Date(ms).toISOString().slice(11, 16)} UTC` : "—"
+/** "05:12" in the viewer's own time zone, 24-hour and locale-independent. */
+export function formatClockLocal(ms: number): string {
+  if (!Number.isFinite(ms)) return "—"
+  const date = new Date(ms)
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`
 }
+
+/** "42m left (until 05:12)": the session's real end, from the server's token. */
+export function sessionTimeText(expiresAt: number, now: number): string {
+  return `${minutesLeft(expiresAt, now)}m left (until ${formatClockLocal(expiresAt)})`
+}
+
+/** The header's "Extend session" control: idle, waiting for the wallet, or the last try did not renew. */
+export type ExtendControl = { readonly status: "idle" | "pending" | "failed"; readonly run: () => void }
 
 function ConsoleFrame({ children }: { children: ReactNode }) {
   return <div className="arco-demo flex min-h-screen flex-col bg-[var(--color-arco-page)] text-[var(--color-arco-ink)]">{children}</div>
@@ -137,7 +151,7 @@ function GateBody({ view, wallet, actions }: { view: Exclude<GateView, { kind: "
               <KeyRound aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
               <span>
                 {view.notice.kind === "expired"
-                  ? "Your operator session expired (sessions last 15 minutes). Sign in again to continue."
+                  ? "Your operator session expired. Sign in again to continue."
                   : view.notice.kind === "rejected"
                     ? "The server did not accept your session (401). Sign in again to continue."
                     : signInFailureText(view.notice.code)}
@@ -146,7 +160,7 @@ function GateBody({ view, wallet, actions }: { view: Exclude<GateView, { kind: "
           )}
           <GateText>
             Signing a message proves you control {wallet ? <span className="font-mono">{shortAddress(wallet)}</span> : "this wallet"}. It does not
-            authorize a transaction. The session lasts at most 15 minutes and is kept in this tab's memory only.
+            authorize a transaction. The session lasts up to {ADMIN_SESSION_MAX_MS / 60_000} minutes and is kept in this tab's memory only.
           </GateText>
           <GateButtons>
             <button type="button" className={PRIMARY} onClick={actions.signIn}>
@@ -223,6 +237,21 @@ function GateBody({ view, wallet, actions }: { view: Exclude<GateView, { kind: "
   }
 }
 
+/** What this wallet can do here, in words (accessRoles); the grant chips beside it keep the raw permissions. */
+export function AccessBadge({ access }: { access: ConsoleAccess }) {
+  const roles = accessRoles(access)
+  if (!roles.length) return null
+  return (
+    <span
+      data-testid="console-access"
+      title="What this wallet may do in the console, from the server's operator lists. A transaction also needs the wallet's own role on that contract."
+      className="max-w-full rounded-[var(--radius-pill)] border border-[var(--color-arco-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-arco-ink)]"
+    >
+      {roles.join(" · ")}
+    </span>
+  )
+}
+
 function GrantChip({ label, grant }: { label: string; grant: OperatorGrant }) {
   return (
     <span className="max-w-full truncate rounded-[var(--radius-pill)] bg-[var(--color-arco-chip)] px-2.5 py-1 text-[11px] text-[var(--color-arco-text-soft)]">
@@ -236,6 +265,8 @@ export function ConsoleShell({
   info,
   access,
   expiresAt,
+  now,
+  extend,
   forbidden,
   onDismissForbidden,
   onSignOut,
@@ -244,6 +275,9 @@ export function ConsoleShell({
   info: AdminSessionInfo
   access: ConsoleAccess
   expiresAt: number
+  /** The clock the remaining time is read against (the console ticks it at least once a minute). */
+  now: number
+  extend: ExtendControl
   forbidden: boolean
   onDismissForbidden: () => void
   onSignOut: () => void
@@ -259,11 +293,13 @@ export function ConsoleShell({
             <div className="min-w-0">
               <p className="text-sm font-semibold text-[var(--color-arco-ink)]">Arco admin</p>
               <p className="truncate text-[11px] text-[var(--color-arco-text-soft)]">
-                <span className="font-mono">{shortAddress(info.wallet)}</span> · session until {formatClockUtc(expiresAt)}
+                <span className="font-mono">{shortAddress(info.wallet)}</span> · <span data-testid="console-session-time">{sessionTimeText(expiresAt, now)}</span>
               </p>
             </div>
           </div>
           <div className="flex min-w-0 flex-wrap items-center gap-2">
+            {inExtendWindow(expiresAt, now) && <ExtendNotice extend={extend} />}
+            <AccessBadge access={access} />
             {info.vault && <GrantChip label="Vaults" grant={info.vault} />}
             {info.stocks && <GrantChip label="Stocks" grant={info.stocks} />}
             <button type="button" onClick={onSignOut} className={`${SECONDARY} min-h-8 px-3 py-1 text-xs`}>
@@ -309,6 +345,27 @@ export function ConsoleShell({
         </main>
       </div>
     </ConsoleFrame>
+  )
+}
+
+/**
+ * The last 5 minutes of a session: sign the same message again without leaving the page. The status text
+ * changes only with the control's state (never with the minutes), so a screen reader is not told every minute.
+ */
+export function ExtendNotice({ extend }: { extend: ExtendControl }) {
+  const pending = extend.status === "pending"
+  return (
+    <div
+      role="status"
+      data-testid="console-extend"
+      className="flex min-w-0 flex-wrap items-center gap-2 rounded-[var(--radius-card)] border border-dashed border-[var(--color-arco-ink)] px-2.5 py-1 text-[11px] text-[var(--color-arco-ink)]"
+    >
+      <span>{extend.status === "failed" ? "Not extended. This session continues until it ends." : "Your session ends soon."}</span>
+      <button type="button" onClick={extend.run} disabled={pending} className={`${SECONDARY} min-h-8 px-3 py-1 text-xs`}>
+        {pending ? <Loader2 aria-hidden="true" className="size-3.5 animate-spin" /> : <KeyRound aria-hidden="true" className="size-3.5" />}
+        {pending ? "Waiting for the wallet…" : "Extend session"}
+      </button>
+    </div>
   )
 }
 

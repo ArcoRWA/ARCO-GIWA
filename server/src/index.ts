@@ -4,7 +4,7 @@ import { configuredStocksRuntime, stocksAutodispatch } from "./stocks-runtime/ru
 import { validateLocalCustomerEnvironment } from "./stocks-runtime/local-customer.js"
 import { closeOnce, installServerShutdown, startManagedStocksServer } from "./stocks-runtime/lifecycle.js"
 import { stocksSessionResolvers } from "./stocks-runtime/session.js"
-import { sessionDomains } from "./admin-auth/session.js"
+import { adminSessionDomains, sessionDomains } from "./admin-auth/session.js"
 import { StocksSubmissionsService } from "./stocks-submissions/service.js"
 import { configuredStocksMarketClock, configuredStocksMarketData, stocksMarketProfileStoreEnabled } from "./stocks-market-runtime/config.js"
 import { createSqlProfileStore, prismaProfileStoreSql } from "./stocks-market-data/profile-store.js"
@@ -21,6 +21,11 @@ import { GIWA_CHAIN_ID } from "./registry/products.js"
 import { GiwaReadinessChecker } from "./readiness/checker.js"
 import { EvmMarketService } from "./services/evm-market-service.js"
 import { EvmMonitoringService } from "./services/evm-monitoring-service.js"
+import {
+  createConcurrencyLimiter,
+  createTokenBalanceReader,
+  MONITORING_BALANCE_READ_CONCURRENCY,
+} from "./services/token-balance-reader.js"
 import { EvmPortfolioService } from "./services/evm-portfolio-service.js"
 import { EvmRegistryService } from "./services/evm-registry-service.js"
 import { PrismaArcoService } from "./services/prisma-arco-service.js"
@@ -53,6 +58,12 @@ export async function startServer(envSource: NodeJS.ProcessEnv = process.env, cl
     validateLocalCustomerEnvironment(envSource)
   }
   const env = validateServerEnv(envSource)
+  if (env.adminSessionOriginsIgnored.length > 0) {
+    // Origins are public configuration (no secret); an ignored entry keeps its sessions at 15 minutes.
+    console.warn(
+      `[config] ADMIN_SESSION_ORIGINS: ignored ${env.adminSessionOriginsIgnored.join(", ")} (each entry must be an exact http(s) origin also listed in CORS_ALLOWED_ORIGINS); those sessions stay at 15 minutes`,
+    )
+  }
   const autodispatch = stocksAutodispatch(envSource)
   const marketProfileStore = stocksMarketProfileStoreEnabled(envSource)
   const prisma = createPrismaClient()
@@ -211,24 +222,18 @@ async function composeServer(
         return null
       }
     },
-    readTokenBalances: async (tokenAddress, addresses) => {
-      try {
-        const balances = await Promise.all(
-          addresses.map(async (address) => {
-            const balance = (await rpcClient.readContract({
-              address: tokenAddress as `0x${string}`,
-              abi: erc20ReadAbi,
-              functionName: "balanceOf",
-              args: [address as `0x${string}`],
-            })) as bigint
-            return [address, balance.toString()] as const
-          }),
-        )
-        return Object.fromEntries(balances)
-      } catch {
-        return null
-      }
-    },
+    // One process-wide limiter (MONITORING_BALANCE_READ_CONCURRENCY in flight) for every
+    // product and request — the unbounded fan-out here OOM-killed the API.
+    readTokenBalances: createTokenBalanceReader({
+      limit: createConcurrencyLimiter(MONITORING_BALANCE_READ_CONCURRENCY),
+      readBalance: async (tokenAddress, address) =>
+        (await rpcClient.readContract({
+          address: tokenAddress as `0x${string}`,
+          abi: erc20ReadAbi,
+          functionName: "balanceOf",
+          args: [address as `0x${string}`],
+        })) as bigint,
+    }),
   })
   // Wallet-less pause reads. readPauseDetail is uncached (admin console + pause routes);
   // readPauseState is the ~30s-cached catalog summary, which keeps the catalog from issuing
@@ -481,7 +486,8 @@ async function composeServer(
       // The Vault admin routes use the same session check (buildApp) with ADMIN_OPERATORS,
       // whether or not the Stocks runtime is on.
       const sessions = stocks ? stocksSessionResolvers(env.authJwtSecret,
-        sessionDomains(env.corsAllowedOrigins), stocks.operators) : undefined
+        sessionDomains(env.corsAllowedOrigins), stocks.operators,
+        adminSessionDomains(env.adminSessionOrigins, env.corsAllowedOrigins)) : undefined
       return buildApp(
         {
           corsAllowedOrigins: env.corsAllowedOrigins,
@@ -491,6 +497,7 @@ async function composeServer(
           adminOperatorToken: env.adminOperatorToken,
           adminLegacyTokenAuth: env.adminLegacyTokenAuth,
           adminWithdrawAllowlist: env.adminWithdrawAllowlist,
+          adminSessionOrigins: env.adminSessionOrigins,
           registryPath: env.registryPath,
         },
         {

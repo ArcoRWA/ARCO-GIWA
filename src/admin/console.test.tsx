@@ -8,17 +8,21 @@ import { MemoryRouter } from "react-router-dom"
 import {
   AdminSessionContractError,
   accessOf,
+  accessRoles,
   CONSOLE_NAV,
   defaultPath,
   gateView,
   groupOfPath,
   parseAdminSession,
   READ_ONLY_VAULT_REASON,
+  ADMIN_SESSION_MAX_MS,
+  inExtendWindow,
+  minutesLeft,
   visibleNav,
   type AdminSessionInfo,
   type GateInput,
 } from "./console-model"
-import { ConsoleGate, ConsoleShell, ForbiddenNotice, ForbiddenPanel, ReadOnlyNotice, type GateActions } from "./ConsoleViews"
+import { ConsoleGate, ConsoleShell, ExtendNotice, ForbiddenNotice, ForbiddenPanel, formatClockLocal, ReadOnlyNotice, sessionTimeText, type ExtendControl, type GateActions } from "./ConsoleViews"
 import { StocksTabView, explorerTxUrl } from "./StocksSection"
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -62,6 +66,8 @@ test("before sign-in: connect, switch network, then sign in; nothing is offered 
   assert.match(text(signIn), /Sign in with wallet/)
   assert.match(text(signIn), /does not authorize a transaction/)
   assert.match(text(signIn), /memory only/)
+  assert.match(text(signIn), /The session lasts up to 60 minutes/)
+  assert.doesNotMatch(text(signIn), /15 minutes/)
   assert.doesNotMatch(signIn, /type="password"|Operator token/)
 })
 
@@ -76,7 +82,8 @@ test("an expired session or a 401 returns to sign-in with the reason", () => {
 
   const expiredHtml = renderToStaticMarkup(<ConsoleGate view={expired as never} wallet={WALLET} actions={actions} />)
   assert.match(expiredHtml, /data-testid="console-notice-expired"/)
-  assert.match(text(expiredHtml), /session expired .* Sign in again/)
+  assert.match(text(expiredHtml), /Your operator session expired\. Sign in again to continue\./)
+  assert.doesNotMatch(text(expiredHtml), /15 minutes/)
   const rejectedHtml = renderToStaticMarkup(<ConsoleGate view={rejected as never} wallet={WALLET} actions={actions} />)
   assert.match(rejectedHtml, /role="alert"/)
   assert.match(text(rejectedHtml), /did not accept your session \(401\)\. Sign in again/)
@@ -140,11 +147,14 @@ test("tabs follow the permissions: each group needs its read permission; / opens
   assert.equal(CONSOLE_NAV.flatMap((group) => group.tabs).length, 14)
 })
 
-function shell(vault: string[] | null, stocks: string[] | null, path = "/", signerWallet = false) {
+const EXPIRES = Date.UTC(2026, 8, 26, 3, 15)
+const idleExtend: ExtendControl = { status: "idle", run: noop }
+
+function shell(vault: string[] | null, stocks: string[] | null, path = "/", signerWallet = false, now = EXPIRES - 42 * 60_000, extend = idleExtend, expiresAt = EXPIRES) {
   const session = info(vault, stocks, signerWallet)
   return renderToStaticMarkup(
     <MemoryRouter initialEntries={[path]}>
-      <ConsoleShell info={session} access={accessOf(session)} expiresAt={Date.UTC(2026, 8, 26, 3, 15)} forbidden={false} onDismissForbidden={noop} onSignOut={noop}>
+      <ConsoleShell info={session} access={accessOf(session)} expiresAt={expiresAt} now={now} extend={extend} forbidden={false} onDismissForbidden={noop} onSignOut={noop}>
         <p>page</p>
       </ConsoleShell>
     </MemoryRouter>,
@@ -159,7 +169,8 @@ test("the signed-in shell shows only the permitted groups, the operator identity
   assert.match(both, /href="\/stocks\/held"[^>]*aria-current="page"|aria-current="page"[^>]*href="\/stocks\/held"/)
   assert.match(text(both), /Vaults: vault-op · vault:read vault:write/)
   assert.match(text(both), /Stocks: stocks-op · stocks:read/)
-  assert.match(text(both), /session until 03:15 UTC/)
+  assert.match(text(both), new RegExp(`0x0000…00a1 · 42m left \\(until ${formatClockLocal(EXPIRES)}\\)`))
+  assert.doesNotMatch(both, /UTC/)
 
   const vaultsOnly = shell(["vault:read"], null)
   assert.match(vaultsOnly, /href="\/vaults\/operations"/)
@@ -173,6 +184,69 @@ test("the signed-in shell shows only the permitted groups, the operator identity
   const signer = shell(["vault:read", "vault:write"], ["stocks:read"], "/vaults/arcousd", true)
   assert.match(signer, /data-testid="console-signer-wallet"/)
   assert.match(text(signer), /This wallet is the Stocks signer Do not send transactions from it here\. Any transaction from this wallet stops Stocks/)
+})
+
+test("the header says what the signed-in wallet can do, in words, from the server's permissions only", () => {
+  assert.deepEqual(accessRoles(accessOf(info(["vault:read", "vault:write"], ["stocks:read", "stocks:control"]))), ["Vault operator", "Stocks operator"])
+  assert.deepEqual(accessRoles(accessOf(info(["vault:read"], ["stocks:read"]))), ["Vaults read-only", "Stocks read-only"])
+  assert.deepEqual(accessRoles(accessOf(info(["vault:read", "vault:write"], null))), ["Vault operator"])
+  assert.deepEqual(accessRoles(accessOf(info(null, ["stocks:read"]))), ["Stocks read-only"])
+  assert.deepEqual(accessRoles(accessOf(info(["something:else"], null))), [])
+
+  const operator = shell(["vault:read", "vault:write"], ["stocks:read"])
+  assert.match(operator, /data-testid="console-access"[^>]*>Vault operator · Stocks read-only</)
+  assert.match(text(operator), /Vaults: vault-op · vault:read vault:write/) // the raw grants stay beside it
+  assert.match(shell(["vault:read"], null), /data-testid="console-access"[^>]*>Vaults read-only</)
+})
+
+test("the header shows the minutes left and the local end time; the time text is never a live region", () => {
+  assert.equal(minutesLeft(EXPIRES, EXPIRES - 41 * 60_000 - 1), 42)
+  assert.equal(minutesLeft(EXPIRES, EXPIRES - 60 * 60_000), 60)
+  assert.equal(minutesLeft(EXPIRES, EXPIRES - 30_000), 1)
+  assert.equal(minutesLeft(EXPIRES, EXPIRES + 1), 0)
+  // The viewer's own time zone: 03:15 UTC reads 12:15 in Seoul and 23:15 the day before in New York.
+  const zone = process.env.TZ
+  try {
+    process.env.TZ = "Asia/Seoul"
+    assert.equal(sessionTimeText(EXPIRES, EXPIRES - 42 * 60_000), "42m left (until 12:15)")
+    process.env.TZ = "America/New_York"
+    assert.equal(formatClockLocal(EXPIRES), "23:15")
+  } finally {
+    if (zone === undefined) delete process.env.TZ
+    else process.env.TZ = zone
+  }
+  assert.equal(formatClockLocal(NaN), "—")
+  const html = shell(["vault:read"], null)
+  assert.match(html, /<span data-testid="console-session-time">42m left/)
+  assert.doesNotMatch(html, /aria-live/)
+  assert.doesNotMatch(html, /console-extend/, "no extend notice with 42 minutes left")
+})
+
+test("a 15-minute server session reads 15 minutes, not the 60-minute maximum", () => {
+  assert.equal(ADMIN_SESSION_MAX_MS, 3_600_000)
+  const now = EXPIRES - 15 * 60_000
+  assert.match(text(shell(["vault:read"], null, "/", false, now)), /15m left \(until /)
+})
+
+test("in the last 5 minutes the header offers Extend session; the notice text does not change with the minutes", () => {
+  assert.equal(inExtendWindow(EXPIRES, EXPIRES - 5 * 60_000 - 1), false)
+  assert.equal(inExtendWindow(EXPIRES, EXPIRES - 5 * 60_000), true)
+  assert.equal(inExtendWindow(EXPIRES, EXPIRES - 1), true)
+  assert.equal(inExtendWindow(EXPIRES, EXPIRES), false)
+  const at = (minutes: number, extend = idleExtend) => shell(["vault:read"], null, "/", false, EXPIRES - minutes * 60_000, extend)
+  assert.doesNotMatch(at(6), /console-extend/)
+  const four = at(4)
+  assert.match(four, /data-testid="console-extend"/)
+  assert.match(four, /role="status"[^>]*data-testid="console-extend"|data-testid="console-extend"[^>]*role="status"/)
+  assert.match(text(four), /4m left .* Your session ends soon\. Extend session/)
+  // The live region holds no minute count, so it is not re-announced as the minutes change.
+  const notice = (extend: ExtendControl) => renderToStaticMarkup(<ExtendNotice extend={extend} />)
+  assert.equal(notice(idleExtend), renderToStaticMarkup(<ExtendNotice extend={idleExtend} />))
+  assert.doesNotMatch(text(notice(idleExtend)), /\d+m/)
+  const pending = notice({ status: "pending", run: noop })
+  assert.match(pending, /disabled=""/)
+  assert.match(text(pending), /Waiting for the wallet/)
+  assert.match(text(notice({ status: "failed", run: noop })), /Not extended\. This session continues until it ends\. Extend session/)
 })
 
 test("403: a refused request shows a notice, and an unpermitted group shows a panel instead of the page", () => {

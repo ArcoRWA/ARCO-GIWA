@@ -45,7 +45,8 @@ import {
   type VaultPauseDetail,
   type VaultPauseState,
 } from "./evm/pause-state.js"
-import { siweSessionWallet } from "./admin-auth/session.js"
+import { adminSessionDomains, siweSessionWallet } from "./admin-auth/session.js"
+import { sessionMaxSeconds } from "./stocks-runtime/session.js"
 import { SESSION_WALLET_CODE, SESSION_WALLET_ERROR, SIGNER_WALLET_CODE, SIGNER_WALLET_ERROR } from "./admin-auth/signer-wallets.js"
 import type { Operator } from "./stocks/contracts.js"
 import {
@@ -93,6 +94,8 @@ export type AppEnv = {
   readonly adminLegacyTokenAuth?: boolean
   /** ADMIN_WITHDRAW_ALLOWLIST (lowercased). withdrawTo also accepts the product's adminDepositAddress; nothing else. */
   readonly adminWithdrawAllowlist?: readonly string[]
+  /** ADMIN_SESSION_ORIGINS: admin console origins whose SIWE sessions last 60 minutes (others 15). Only entries also in corsAllowedOrigins count. */
+  readonly adminSessionOrigins?: readonly string[]
 }
 
 // Per-vault pause snapshot for the public catalog (see evm/pause-state.ts): `*Paused` OR-includes
@@ -410,7 +413,7 @@ export function buildApp(env: AppEnv, services: ArcoAppServices) {
   // The legacy shared token counts only when ADMIN_LEGACY_TOKEN_AUTH=1, and never on the
   // Stocks routes, which resolve sessions only.
   const adminAuthority = createAdminAuthority({
-    resolveSessionWallet: siweSessionWallet(env.authJwtSecret, env.corsAllowedOrigins),
+    resolveSessionWallet: siweSessionWallet(env.authJwtSecret, env.corsAllowedOrigins, env.adminSessionOrigins),
     vaultOperators: env.adminOperators ?? [],
     legacyToken: env.adminLegacyTokenAuth ? env.adminOperatorToken : null,
   })
@@ -578,6 +581,7 @@ export function buildApp(env: AppEnv, services: ArcoAppServices) {
     services.portfolio.faucetStatus(parseAddress(request.params.wallet, "wallet").toLowerCase(), GIWA_CHAIN_ID),
   )
 
+  const adminDomains = new Set(adminSessionDomains(env.adminSessionOrigins, env.corsAllowedOrigins))
   app.post("/api/v1/auth/nonce", async (request, reply) => {
     const body = asObject(request.body)
     const walletAddress = parseAddress(body.walletAddress, "walletAddress").toLowerCase()
@@ -629,10 +633,13 @@ export function buildApp(env: AppEnv, services: ArcoAppServices) {
     if (!consumed) return reply.code(401).send({ error: "SIWE nonce is expired, unknown, or already used" })
 
     const walletAddress = message.address.toLowerCase()
+    // 60 minutes when the message was signed on an admin console domain (ADMIN_SESSION_ORIGINS), else 15.
+    // The domain claim is signed, and every resolver applies the same per-domain limit.
+    const lifetime = sessionMaxSeconds(message.domain, adminDomains)
     const token = signJwt({ sub: walletAddress, domain: message.domain, chainId: message.chainId }, env.authJwtSecret, {
-      expiresIn: "15m",
+      expiresIn: lifetime,
     })
-    return { token, walletAddress, chainId: message.chainId, expiresIn: 900 }
+    return { token, walletAddress, chainId: message.chainId, expiresIn: lifetime }
   })
 
   // Who is signed in and what the directories grant. 401 without a valid session; a wallet in

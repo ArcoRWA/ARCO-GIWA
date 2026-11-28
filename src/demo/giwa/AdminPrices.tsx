@@ -16,9 +16,9 @@ import {
 } from "./PriceFeedAdminPanel"
 import { fromAnswer, impliedApyPercent, isStale, SECONDS_PER_DAY } from "./price-policy"
 import { useGiwaAdmin } from "./admin-context"
-import { agoText, gasText, shortAddress } from "./arcousd-admin"
+import { agoText, shortAddress } from "./arcousd-admin"
 import { readableError } from "./contracts"
-import { priceBotHeadline, priceBotRows } from "./price-bot-status"
+import { PRICE_BOT_LOW_GAS_HINT, priceBotGas, priceBotHeadline, priceBotRows } from "./price-bot-status"
 import { Pill } from "./stocks-admin/ui"
 import type { GiwaCatalogItem, GiwaPriceBotStatus, HexAddress } from "./types"
 
@@ -110,6 +110,7 @@ export function PriceBotCard({
   const headline = priceBotHeadline(status)
   const rows = priceBotRows(status, symbols, now)
   const report = status?.bot?.report ?? null
+  const gas = priceBotGas(report)
   return (
     <section className="w-full min-w-0 rounded-[var(--radius-card)] bg-[var(--color-arco-surface)] p-5 shadow-[var(--shadow-control)]">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -133,7 +134,10 @@ export function PriceBotCard({
           </div>
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <dt className="text-[var(--color-arco-muted)]">Gas</dt>
-            <dd className="tabular-nums text-[var(--color-arco-ink)]">{gasText(report.balanceWei)}</dd>
+            <dd className={`tabular-nums ${gas.low ? "font-medium text-[var(--color-arco-down)]" : "text-[var(--color-arco-ink)]"}`} data-testid="price-bot-gas">
+              {gas.text}
+              {gas.low && <span className="block text-[11px] font-normal">{PRICE_BOT_LOW_GAS_HINT}</span>}
+            </dd>
           </div>
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <dt className="text-[var(--color-arco-muted)]">Last round</dt>

@@ -11,9 +11,8 @@ import {
   ExternalLink,
   Info,
   Loader2,
-  LogOut,
-  ShieldCheck,
   Wallet,
+  ShieldCheck,
   X,
 } from "lucide-react"
 import { formatUnits, parseUnits } from "viem"
@@ -46,7 +45,8 @@ import { isAdminAddress, parseAdminAddresses } from "./admin-access"
 import { GIWA_PREPROD_ROUTE, giwaProductPath } from "./routes"
 import { GiwaProductSearch } from "./GiwaProductSearch"
 import { BAR_ICON_SLOT, BAR_ITEM, BAR_LABEL, NAV_FOCUS, RAIL_TAB } from "./nav-ui"
-import { NETWORK_COPY, SwitchToGiwaButton, switchFailureMessage, waitForWallet } from "./wallet-network"
+import { NETWORK_COPY, useEnsureGiwa, waitForWallet, walletChipStatus } from "./wallet-network"
+import { WALLET_CONTROL, WalletChip } from "./WalletChip"
 import { BrandMark } from "../components/BrandMark"
 import { ListedFundRow, RateCell } from "./ListedFundRow"
 import { RISK_LABEL, RiskTag, vaultCategoryRisk, type RiskLevel } from "./RiskTag"
@@ -429,42 +429,48 @@ export function GiwaNetworkIcon({ size = 20 }: { size?: number }) {
   )
 }
 
+// The top bar's wallet control. Connected: WalletChip (mock W2) — a 32px chip with a status dot (up green on GIWA; amber on
+// another network, where every action switches first, ensureGiwa), the short address and a chevron, opening a menu with
+// Copy address, the network line, View on explorer and Disconnect. Not connected: a small ink pill, "Connect", fixed in
+// width so "Connecting" (while the wallet's connection is pending, wallet.connecting) does not move the bar. The
+// page-level connect buttons are not this one.
 export function GiwaWalletButton() {
   const wallet = useGiwaWallet()
 
   if (wallet.connected && wallet.address) {
-    const onGiwa = wallet.chainId === GIWA_CHAIN_ID
-    // On another network a phone's chip carries the switch button and Disconnect (the address comes back from sm), so
-    // the top bar still fits at 320px.
-    const phoneHidden = onGiwa ? "" : "hidden sm:inline-flex"
-    return (
-      <div className={`inline-flex h-8 items-center gap-2 rounded-full bg-[var(--color-arco-surface)] py-1 pl-1 shadow-[var(--shadow-control)] ${onGiwa ? "pr-2" : "pr-1 sm:pr-2"}`}>
-        {onGiwa ? (
-          <span className="rounded-full bg-[var(--color-arco-chip)] px-2 py-0.5 text-xs text-[var(--color-arco-text-soft)]">GIWA</span>
-        ) : (
-          <SwitchToGiwaButton wallet={wallet} />
-        )}
-        <span className={`font-mono text-xs text-[var(--color-arco-muted)] ${phoneHidden}`}>{shortAddr(wallet.address)}</span>
-        <button
-          type="button"
-          aria-label="Disconnect wallet"
-          className={`inline-flex size-6 shrink-0 items-center justify-center rounded-full text-[var(--color-arco-muted)] hover:bg-[var(--color-arco-chip)]`}
-          onClick={wallet.disconnect}
-        >
-          <LogOut className="size-3.5" />
-        </button>
-      </div>
-    )
+    const { onGiwa, label } = walletChipStatus(wallet)
+    return <WalletChip address={wallet.address} onGiwa={onGiwa} label={label} onDisconnect={wallet.disconnect} />
   }
 
+  const connecting = wallet.connecting
+  // The width is the idle row's (icon + "Connect Wallet", kept invisible in the flow); the shown row sits centred over it,
+  // so "Connecting" with its spinner does not move the bar.
+  const row = (connectingRow: boolean) => (
+    <>
+      {connectingRow ? (
+        <Loader2 aria-hidden="true" className="size-4 shrink-0 animate-spin text-[var(--color-arco-muted)]" />
+      ) : (
+        <Wallet aria-hidden="true" className="size-4 shrink-0 text-[var(--color-arco-ink)]" />
+      )}
+      <span>{connectingRow ? "Connecting" : "Connect Wallet"}</span>
+    </>
+  )
   return (
     <button
       type="button"
-      className="inline-flex h-9 items-center gap-2 rounded-md bg-[var(--color-arco-ink)] px-3 text-sm font-medium text-[var(--color-arco-cream)] lg:h-12 lg:px-6 lg:text-base"
+      aria-label="Connect wallet"
+      aria-busy={connecting || undefined}
       onClick={() => void wallet.connect()}
+      className={`${WALLET_CONTROL} relative shrink-0 whitespace-nowrap px-3.5 text-sm font-medium text-[var(--color-arco-ink)] ${
+        connecting ? "cursor-progress" : "hover:bg-[var(--color-arco-page)] active:bg-[var(--color-arco-chip)]"
+      }`}
     >
-      <Wallet className="size-4" />
-      Connect Wallet
+      <span aria-hidden="true" data-connect-label="reserved" className="invisible flex items-center gap-2">
+        {row(false)}
+      </span>
+      <span data-connect-label="shown" className="absolute inset-0 flex items-center justify-center gap-2">
+        {row(connecting)}
+      </span>
     </button>
   )
 }
@@ -498,8 +504,6 @@ function writeFaucetLastMint(address: string, at: number) {
 const MINT_COPY = { confirm: "Confirm in your wallet" } as const
 /** How long Mint test assets waits for a connection the press opened (the user picks a wallet meanwhile). */
 const MINT_CONNECT_TIMEOUT_MS = 120_000
-/** How long it waits, after the wallet says it switched, for the app to see GIWA and be able to sign there. */
-const MINT_SWITCH_SETTLE_MS = 15_000
 
 function formatRemaining(ms: number): string {
   const totalMinutes = Math.max(1, Math.ceil(ms / 60000))
@@ -543,6 +547,7 @@ export function TestFundsButton({ admin = false, look }: { admin?: boolean; look
   // The wallet as it is now: a connect or a switch lands a render after its promise.
   const walletRef = useRef(wallet)
   walletRef.current = wallet
+  const ensureGiwa = useEnsureGiwa()
   // The rail's notice is a popover fixed beside the rail (the rail's middle scrolls on a short screen and would clip
   // anything inside it), next to the Mint item and kept on screen.
   const hasNotice = Boolean(status || cooldownNotice || message || balances.length > 0)
@@ -592,23 +597,16 @@ export function TestFundsButton({ admin = false, look }: { admin?: boolean; look
           return
         }
       }
-      // Another network: switch, then carry on once the wallet reports GIWA and can sign there.
-      if (current.chainId !== GIWA_CHAIN_ID) {
-        setStatus(NETWORK_COPY.approve)
-        const result = await current.switchToGiwa()
-        if (!result.ok) {
-          setPhase("failed")
-          setMessage(switchFailureMessage(result))
-          return
-        }
-        const switched = await waitForWallet(walletRef, (next) => next.chainId === GIWA_CHAIN_ID && next.signingReady, MINT_SWITCH_SETTLE_MS)
-        if (!switched?.address) {
-          setPhase("failed")
-          setMessage(NETWORK_COPY.failed("the wallet did not report GIWA Sepolia."))
-          return
-        }
-        current = switched
+      // On GIWA, able to sign there: ensureGiwa asks for nothing. Another network: it asks the wallet to switch (the
+      // approval line shows meanwhile), waits until the app sees GIWA, and the mint carries on in the same press.
+      if (current.chainId !== GIWA_CHAIN_ID) setStatus(NETWORK_COPY.approve)
+      const ensured = await ensureGiwa()
+      if (!ensured.ok) {
+        setPhase("failed")
+        setMessage(ensured.message)
+        return
       }
+      current = walletRef.current
       const account = current.address!
       if (!faucet) throw new Error("Faucet address is missing from the registry")
       // Pre-empt the 24h faucet cooldown on the client so we don't spend gas on a

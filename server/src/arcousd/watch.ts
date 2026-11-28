@@ -22,6 +22,24 @@ export type KeeperSeen = {
   } | null
 }
 
+/** What the fund price bot last wrote to its heartbeat (server/src/funds/price-bot.ts PriceBotReport, as stored). */
+export type PriceBotSeen = {
+  readonly lastRunAt: Date
+  readonly lastOkAt: Date | null
+  readonly lastError: string | null
+  readonly report: {
+    readonly mode?: string
+    readonly intervalMs?: number
+    readonly ok?: boolean
+    readonly error?: string | null
+    readonly address?: string | null
+    readonly balanceWei?: string | null
+    /** Absent in reports from bots before 2026-11: the watcher then uses PRICE_BOT_LOW_GAS_WEI. */
+    readonly lowGasWei?: string
+    readonly lowGas?: boolean | null
+  } | null
+}
+
 /** What the watcher read of Savings this round (the input is absent while Savings is not deployed). */
 export type SavingsSeen = {
   /** null when the vault or the distributor could not be read (`error` says why). */
@@ -64,6 +82,10 @@ const MINUTE = 60_000
 export const SAVINGS_OVERDUE_MS = 2 * 60 * MINUTE
 /** Savers beyond the seed and no distribution for this long: "earning nothing". */
 export const SAVINGS_NO_YIELD_MS = 7 * 24 * 60 * MINUTE
+/** The price bot checks every 10 minutes and posts once a UTC day: silent this long (or 3 rounds) is "not running". */
+export const PRICE_BOT_STALE_MIN_MS = 30 * MINUTE
+/** The bot's own default (PRICE_BOT_DEFAULTS.lowGasWei, 0.005 ETH), for reports that do not carry a threshold. */
+export const PRICE_BOT_LOW_GAS_WEI = 5_000_000_000_000_000n
 /** sArcoUSD MIN_SHARES, held by 0x…dEaD after the seed: a supply above it means real savers. */
 const SEED_SHARES = 10n ** 18n
 
@@ -90,6 +112,8 @@ export type WatchInput = {
   readonly keeper?: KeeperSeen | null
   /** Savings (sArcoUSD); absent or null while it is not deployed. */
   readonly savings?: SavingsSeen | null
+  /** The fund price bot's heartbeat; null (or absent) when it has never run. */
+  readonly priceBot?: PriceBotSeen | null
 }
 
 export function evaluateWatch(input: WatchInput): Finding[] {
@@ -142,6 +166,7 @@ export function evaluateWatch(input: WatchInput): Finding[] {
 
   for (const recall of input.recalls ?? []) recallRules(recall, add)
   if (input.keeper) keeperRules(input.keeper, input.now, add)
+  if (input.priceBot) priceBotRules(input.priceBot, input.now, add)
   if (input.savings) savingsRules(input.savings, input, add)
   return findings
 }
@@ -184,6 +209,57 @@ function keeperRules(keeper: KeeperSeen, now: number, add: Add) {
       sustainMs: 0,
     })
   }
+}
+
+/**
+ * The fund price bot's health. It runs in the keeper worker with its own wallet and posts the daily testnet product
+ * prices; `off` (or a bot that never ran) raises nothing.
+ */
+function priceBotRules(bot: PriceBotSeen, now: number, add: Add) {
+  const report = bot.report
+  const mode = report?.mode
+  if (mode !== "dry-run" && mode !== "live") return
+  const interval = typeof report?.intervalMs === "number" && report.intervalMs > 0 ? report.intervalMs : 0
+  const silentFor = now - bot.lastRunAt.getTime()
+  if (silentFor > Math.max(PRICE_BOT_STALE_MIN_MS, 3 * interval)) {
+    add({
+      key: "price-bot:stale",
+      severity: "WARNING",
+      title: "Price bot not running",
+      detail: `The ${mode} price bot last reported ${duration(silentFor / 1000)} ago. Until it is back, the daily HOME, PPLUS, JX, aBTC and aXRP prices are not posted: check the arco-arcousd-keeper worker, or post by hand from the Prices page.`,
+      sustainMs: 0,
+    })
+    return // its other readings are as old as that
+  }
+  if (report?.ok === false || bot.lastError) {
+    add({
+      key: "price-bot:failing",
+      severity: "WARNING",
+      title: "Price bot failing",
+      detail: `The last price bot round failed: ${report?.error ?? bot.lastError ?? "no reason recorded"}`,
+      sustainMs: 0,
+    })
+  }
+  const balance = wei(report?.balanceWei)
+  if (mode === "live" && balance !== null) {
+    const threshold = wei(report?.lowGasWei) ?? PRICE_BOT_LOW_GAS_WEI
+    const low = typeof report?.lowGas === "boolean" ? report.lowGas : balance < threshold
+    if (low) {
+      const wallet = report?.address ?? "the price bot wallet"
+      add({
+        key: "price-bot:low-gas",
+        severity: "WARNING",
+        title: "Price bot low on gas",
+        detail: `The price bot wallet${report?.address ? ` ${report.address}` : ""} holds ${eth(balance)} ETH (warns below ${eth(threshold)} ETH). Send GIWA Sepolia ETH to ${wallet} so the daily prices keep posting.`,
+        sustainMs: 0,
+      })
+    }
+  }
+}
+
+/** A wei amount from a report, or null when it is missing or not a whole number. */
+function wei(value: unknown): bigint | null {
+  return typeof value === "string" && /^\d{1,40}$/.test(value) ? BigInt(value) : null
 }
 
 type Add = (finding: Omit<Finding, "fingerprint"> & { fingerprint?: string }) => void

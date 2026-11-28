@@ -17,7 +17,8 @@ function deferred<T>() { let resolve!: (value: T) => void; let reject!: (value: 
 async function flush() { for (let i = 0; i < 30; i++) await Promise.resolve() }
 function jwt(claims: Record<string, unknown>) { return `${Buffer.from('{"alg":"HS256"}').toString("base64url")}.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.fixture` }
 type Call = { url: string; init: RequestInit; body: Record<string, unknown> }
-function fixture(overrides: { signing?: (r: MessageRequest) => Promise<string>; intercept?: (call: Call, normal: () => Response) => Promise<Response>; initial?: HostContext } = {}) {
+function fixture(overrides: { signing?: (r: MessageRequest) => Promise<string>; intercept?: (call: Call, normal: () => Response) => Promise<Response>; initial?: HostContext; lifetime?: number; maxSessionMs?: number } = {}) {
+  const lifetime = overrides.lifetime ?? 900
   let time = START
   const timers = new Map<number, { at: number; cb: () => void }>()
   let seq = 0
@@ -27,6 +28,7 @@ function fixture(overrides: { signing?: (r: MessageRequest) => Promise<string>; 
     now: () => time,
     setTimer: (cb, delay) => { const id = ++seq; timers.set(id, { at: time + delay, cb }); return id },
     clearTimer: id => { timers.delete(id as number) },
+    ...(overrides.maxSessionMs === undefined ? {} : { maxSessionMs: overrides.maxSessionMs }),
     signMessage: async r => { signatures.push(r); return overrides.signing ? overrides.signing(r) : SIG },
     fetch: (async (url: string, init: RequestInit) => {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>
@@ -34,7 +36,7 @@ function fixture(overrides: { signing?: (r: MessageRequest) => Promise<string>; 
       const normal = () => {
         if (url.endsWith("/nonce")) return Response.json({ walletAddress: body.walletAddress, domain: body.domain, nonce: "abcdefgh12345678", expiresAt: new Date(time + 60_000).toISOString() })
         const parsed = parseSiweMessage(String(body.message))
-        return Response.json({ walletAddress: parsed.address, chainId: 91342, expiresIn: 900, token: jwt({ sub: parsed.address, chainId: 91342, domain: parsed.domain, iat: Math.floor(time / 1000), exp: Math.floor(time / 1000) + 900 }) })
+        return Response.json({ walletAddress: parsed.address, chainId: 91342, expiresIn: lifetime, token: jwt({ sub: parsed.address, chainId: 91342, domain: parsed.domain, iat: Math.floor(time / 1000), exp: Math.floor(time / 1000) + lifetime }) })
       }
       return overrides.intercept ? overrides.intercept(call, normal) : normal()
     }) as typeof fetch,
@@ -322,4 +324,110 @@ test("prefixed, relative and empty API bases send the auth requests to the exact
     for (const c of f.calls) assert.equal(new Headers(c.init.headers).get("authorization"), null)
     f.controller.dispose()
   }
+})
+
+// ── Session length (maxSessionMs) and renewal ────────────────────────────────
+
+test("the customer default accepts at most 15 minutes; a 60-minute token is refused", async () => {
+  const f = fixture({ lifetime: 3600 })
+  assert.equal(await f.controller.signIn(), null)
+  assert.equal(f.controller.getSnapshot().error, "INVALID_AUTH_RESPONSE")
+  f.controller.dispose()
+})
+
+test("maxSessionMs 3_600_000 (admin console) accepts a 60-minute session and still ends at the token's exp", async () => {
+  const f = fixture({ lifetime: 3600, maxSessionMs: 3_600_000 })
+  const session = await f.controller.signIn()
+  assert.ok(session)
+  assert.equal(session.expiresAt, START + 3_600_000)
+  f.advance(3_599_000); assert.equal(f.controller.getSnapshot().session, session)
+  f.advance(1_000); assert.equal(f.controller.getSnapshot().session, null)
+  assert.equal(f.controller.getSnapshot().error, "SESSION_EXPIRED")
+  f.controller.dispose()
+  // Longer than the limit is refused there too.
+  const g = fixture({ lifetime: 3660, maxSessionMs: 3_600_000 })
+  assert.equal(await g.controller.signIn(), null); g.controller.dispose()
+})
+
+test("a 60-minute host on a server that issues 15 minutes gets a 15-minute session", async () => {
+  const f = fixture({ lifetime: 900, maxSessionMs: 3_600_000 })
+  const session = await f.controller.signIn()
+  assert.ok(session)
+  assert.equal(session.expiresAt, START + 900_000)
+  f.advance(900_000); assert.equal(f.controller.getSnapshot().session, null)
+  f.controller.dispose()
+})
+
+test("an out-of-range maxSessionMs is refused when the host is created", () => {
+  for (const maxSessionMs of [0, 59_000, 3_601_000, 1_500.5, NaN]) {
+    assert.throws(() => fixture({ maxSessionMs }), /INVALID_SESSION_LIMIT/, String(maxSessionMs))
+  }
+})
+
+test("renew keeps the current session while the wallet signs, then publishes a new session with a new ID and end", async () => {
+  const pending = deferred<string>()
+  let sign: () => Promise<string> = async () => SIG
+  const f = fixture({ lifetime: 3600, maxSessionMs: 3_600_000, signing: () => sign() })
+  const first = await f.controller.signIn(); assert.ok(first)
+  f.advance(3_400_000)
+  sign = () => pending.promise
+  const statuses: string[] = []
+  f.controller.subscribe(() => statuses.push(f.controller.getSnapshot().status))
+  const renewal = f.controller.renew()
+  await flush()
+  assert.equal(f.signatures.length, 2)
+  assert.equal(f.controller.getSnapshot().session, first, "the current session stays while signing")
+  assert.equal(f.controller.getSnapshot().status, "authenticated")
+  assert.equal(f.controller.renew(), renewal, "a second click shares the renewal")
+  pending.resolve(SIG)
+  const second = await renewal
+  assert.ok(second)
+  assert.notEqual(second.id, first.id)
+  assert.equal(second.expiresAt, START + 3_400_000 + 3_600_000)
+  assert.deepEqual(statuses, ["authenticated"], "never signed-out or signing-in in between")
+  // The old session's 401 cannot drop the renewed one, and the old expiry no longer applies.
+  f.controller.invalidate(first.id); assert.equal(f.controller.getSnapshot().session, second)
+  f.advance(200_000); assert.equal(f.controller.getSnapshot().session, second)
+  assert.equal(f.timers.size, 1)
+  f.controller.dispose()
+})
+
+test("a rejected renewal signature leaves the current session until it expires", async () => {
+  let reject = false
+  const f = fixture({ lifetime: 3600, maxSessionMs: 3_600_000, signing: async () => { if (reject) throw new Error("user rejected"); return SIG } })
+  const first = await f.controller.signIn(); assert.ok(first)
+  f.advance(3_400_000)
+  reject = true
+  assert.equal(await f.controller.renew(), null)
+  assert.equal(f.controller.getSnapshot().session, first)
+  assert.equal(f.controller.getSnapshot().status, "authenticated")
+  assert.equal(f.controller.getSnapshot().error, null)
+  f.advance(200_000)
+  assert.equal(f.controller.getSnapshot().session, null)
+  assert.equal(f.controller.getSnapshot().error, "SESSION_EXPIRED")
+  f.controller.dispose()
+})
+
+test("expiry during a pending renewal ends the session and discards the late signature", async () => {
+  const pending = deferred<string>()
+  let sign: () => Promise<string> = async () => SIG
+  const f = fixture({ signing: () => sign() })
+  const first = await f.controller.signIn(); assert.ok(first)
+  sign = () => pending.promise
+  const renewal = f.controller.renew(); await flush()
+  f.advance(900_000)
+  assert.equal(f.controller.getSnapshot().session, null)
+  pending.resolve(SIG)
+  assert.equal(await renewal, null)
+  assert.equal(f.controller.getSnapshot().session, null)
+  assert.equal(f.calls.filter(call => call.url.endsWith("/verify")).length, 1, "the late signature is never verified")
+  f.controller.dispose()
+})
+
+test("renew while signed out is an ordinary sign-in", async () => {
+  const f = fixture()
+  const session = await f.controller.renew()
+  assert.ok(session)
+  assert.equal(f.controller.getSnapshot().session, session)
+  f.controller.dispose()
 })

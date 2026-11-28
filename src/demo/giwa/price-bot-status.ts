@@ -1,4 +1,4 @@
-import { agoText } from "./arcousd-admin"
+import { agoText, gasText, shortAddress } from "./arcousd-admin"
 import type { Tone } from "./stocks-admin/ui"
 import type { GiwaPriceBotFund, GiwaPriceBotStatus } from "./types"
 
@@ -79,4 +79,35 @@ export function priceBotRows(status: GiwaPriceBotStatus | null, symbols: Record<
       detail: fund?.detail ?? "No round yet",
     }
   })
+}
+
+/** The bot's own default threshold (server PRICE_BOT_DEFAULTS.lowGasWei), for reports that do not carry one. */
+export const PRICE_BOT_LOW_GAS_WEI = 5_000_000_000_000_000n
+
+/**
+ * The bot wallet's gas: "0.0042 ETH", and whether it is low. A live bot only (a dry run spends no gas), the way the
+ * watcher's price-bot:low-gas alert judges it: the report's own `lowGas`, or below 0.005 ETH for a report from an older
+ * bot without one.
+ */
+export function priceBotGas(report: NonNullable<NonNullable<GiwaPriceBotStatus["bot"]>["report"]> | null | undefined): { text: string; low: boolean } {
+  const balance = report?.balanceWei
+  const text = gasText(balance)
+  if (report?.mode !== "live" || !balance || !/^\d+$/.test(balance)) return { text, low: false }
+  if (typeof report.lowGas === "boolean") return { text, low: report.lowGas }
+  const threshold = report.lowGasWei && /^\d+$/.test(report.lowGasWei) ? BigInt(report.lowGasWei) : PRICE_BOT_LOW_GAS_WEI
+  return { text, low: BigInt(balance) < threshold }
+}
+
+export const PRICE_BOT_LOW_GAS_HINT = "Low: send GIWA Sepolia ETH to the bot wallet"
+
+/**
+ * Why the connected wallet cannot post a price by hand, in an operator's words. `short` sits under each disabled
+ * control; `full` once, by the sign button, keeps the role name for engineers. Wording only: the check is the same.
+ */
+export function manualPostBlockedText(input: { symbol: string; wallet: string; botPosts: boolean }): { short: string; full: string } {
+  const daily = input.botPosts ? `The price bot posts ${input.symbol}'s price every day. ` : ""
+  return {
+    short: `${daily}Posting by hand needs the admin wallet.`,
+    full: `${daily}Posting by hand needs the admin wallet: the connected wallet ${shortAddress(input.wallet)} cannot post to this price feed (it does not hold FEED_ADMIN_ROLE).`,
+  }
 }

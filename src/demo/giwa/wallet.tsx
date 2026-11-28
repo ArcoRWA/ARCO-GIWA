@@ -27,6 +27,11 @@ type WalletContextValue = {
   switchToGiwa: () => Promise<GiwaSwitchResult>
   /** A switch to GIWA is waiting on the wallet. */
   switching: boolean
+  /**
+   * A connection is in progress: the injected wallet has the account request (eth_requestAccounts), or Dynamic's
+   * sign-in is open / its connector is connecting, and no account is connected yet.
+   */
+  connecting: boolean
   refreshBalance: () => Promise<void>
 }
 
@@ -209,12 +214,14 @@ export function GiwaWalletProvider({ children }: { children: ReactNode }) {
     setNativeBalance(formatEther(balance))
   }, [address])
 
+  const [connecting, setConnecting] = useState(false)
   const connect = useCallback(async () => {
     setError(null)
     retireConnection()
     const generation = requestGeneration.current
     const accountVersion = accountGeneration.current
     setChainId(null)
+    setConnecting(true)
     try {
       if (!window.ethereum) throw new Error("No injected wallet is available")
       const accounts = await window.ethereum.request<string[]>({ method: "eth_requestAccounts" })
@@ -227,6 +234,8 @@ export function GiwaWalletProvider({ children }: { children: ReactNode }) {
       if (generation === requestGeneration.current) setChainId(nextChain)
     } catch (err) {
       if (accountVersion === accountGeneration.current) setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setConnecting(false)
     }
   }, [retireConnection])
 
@@ -302,9 +311,10 @@ export function GiwaWalletProvider({ children }: { children: ReactNode }) {
       disconnect,
       switchToGiwa,
       switching,
+      connecting,
       refreshBalance,
     }),
-    [address, chainId, sourceEpoch, source, injectedProvider, connect, disconnect, error, nativeBalance, phase, refreshBalance, switchToGiwa, switching],
+    [address, chainId, sourceEpoch, source, injectedProvider, connect, disconnect, error, nativeBalance, phase, refreshBalance, switchToGiwa, switching, connecting],
   )
 
   return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>
@@ -321,12 +331,12 @@ export function DynamicGiwaWalletProvider({ children }: { children: ReactNode })
 /** The SDK boundary is kept thin so account/chain/source lifecycle can be tested without a live SDK. */
 function DynamicGiwaWalletStateProvider({ children, dynamic, account, switchChainAsync, dynamicWalletClient }: {
   children: ReactNode
-  dynamic: Pick<ReturnType<typeof useDynamicContext>, "handleLogOut" | "network" | "primaryWallet" | "sdkHasLoaded" | "setShowAuthFlow">
+  dynamic: Pick<ReturnType<typeof useDynamicContext>, "handleLogOut" | "network" | "primaryWallet" | "sdkHasLoaded" | "setShowAuthFlow" | "showAuthFlow">
   account: Pick<ReturnType<typeof useAccount>, "address" | "chainId" | "status">
   switchChainAsync: (args: { chainId: number }) => Promise<unknown>
   dynamicWalletClient: (Parameters<typeof setDynamicWalletClient>[0] & { account?: { address?: string }; chain?: { id: number } }) | undefined
 }) {
-  const { handleLogOut, network, primaryWallet, sdkHasLoaded, setShowAuthFlow } = dynamic
+  const { handleLogOut, network, primaryWallet, sdkHasLoaded, setShowAuthFlow, showAuthFlow } = dynamic
   const [nativeBalance, setNativeBalance] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [localLogout, setLocalLogout] = useState(false)
@@ -378,6 +388,8 @@ function DynamicGiwaWalletStateProvider({ children, dynamic, account, switchChai
     void handleLogOut()
   }, [handleLogOut])
 
+  // Dynamic's sign-in is open (the user picks and approves a wallet there), or its connector reports connecting.
+  const connecting = !address && (showAuthFlow || account.status === "connecting" || account.status === "reconnecting")
   const { switching, switchToGiwa } = useSingleSwitch(useCallback(async (): Promise<GiwaSwitchResult> => {
     setError(null)
     const result = await switchDynamicToGiwa({
@@ -418,9 +430,10 @@ function DynamicGiwaWalletStateProvider({ children, dynamic, account, switchChai
       disconnect,
       switchToGiwa,
       switching,
+      connecting,
       refreshBalance,
     }),
-    [address, chainId, connectionEpoch, source, signingReady, connect, disconnect, error, nativeBalance, phase, refreshBalance, switchToGiwa, switching],
+    [address, chainId, connectionEpoch, source, signingReady, connect, disconnect, error, nativeBalance, phase, refreshBalance, switchToGiwa, switching, connecting],
   )
 
   return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>

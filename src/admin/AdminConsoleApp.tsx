@@ -8,7 +8,7 @@ import { useGiwaStocksHost } from "../demo/giwa/stocks-host"
 import { useGiwaWallet } from "../demo/giwa/wallet"
 import { defaultPath, gateView, groupOfPath, groupVisible, type PermissionState } from "./console-model"
 import { ConsoleSessionContext, type ConsoleSession } from "./console-session"
-import { ConsoleGate, ConsoleShell, ForbiddenPanel, type GateActions } from "./ConsoleViews"
+import { ConsoleGate, ConsoleShell, ForbiddenPanel, type ExtendControl, type GateActions } from "./ConsoleViews"
 import { fetchAdminSession } from "./session-api"
 
 const SESSION_QUERY = "admin-console-session"
@@ -28,12 +28,19 @@ export function AdminConsoleApp() {
   const sessionId = hostSession?.id ?? null
   const accessToken = hostSession?.accessToken ?? null
   const [forbidden, setForbidden] = useState(false)
+  const [extendStatus, setExtendStatus] = useState<ExtendControl["status"]>("idle")
+  // The session that "Extend session" is replacing: its permission answer and cached data carry over
+  // to the new session of the same wallet (no other session change carries anything over).
+  const renewingFrom = useRef<string | null>(null)
 
   // Cached admin data belongs to one session: drop it when the session ends or changes.
   const seen = useRef(sessionId)
   useEffect(() => {
     if (seen.current === sessionId) return
+    const renewed = seen.current !== null && sessionId !== null && seen.current === renewingFrom.current
     seen.current = sessionId
+    setExtendStatus("idle")
+    if (renewed) return
     queryClient.removeQueries({ predicate: (query) => !(query.queryKey[0] === SESSION_QUERY && query.queryKey[1] === sessionId) })
     setForbidden(false)
   }, [sessionId, queryClient])
@@ -44,6 +51,9 @@ export function AdminConsoleApp() {
     enabled: Boolean(apiBase && accessToken),
     retry: false,
     staleTime: 60_000,
+    // An extended session keeps showing the console while the server is asked again for the new one.
+    placeholderData: (previous, previousQuery) =>
+      renewingFrom.current !== null && previousQuery?.queryKey[1] === renewingFrom.current ? previous : undefined,
     refetchOnWindowFocus: true,
   })
 
@@ -86,6 +96,29 @@ export function AdminConsoleApp() {
   })
 
   const { connect, switchToGiwa, disconnect } = wallet
+  // The header's remaining time: ticks while signed in (at least once a minute).
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!sessionId) return
+    setNow(Date.now())
+    const timer = setInterval(() => setNow(Date.now()), 15_000)
+    return () => clearInterval(timer)
+  }, [sessionId])
+
+  // "Extend session": the same wallet signature, without leaving the page. A rejected signature keeps
+  // the current session until it ends.
+  const renew = host.renew
+  const runExtend = useCallback(() => {
+    const from = seen.current
+    if (!from) return
+    renewingFrom.current = from
+    setExtendStatus("pending")
+    void renew().then((renewed) => {
+      if (!renewed && seen.current === from) setExtendStatus("failed")
+    })
+  }, [renew])
+  const extend = useMemo<ExtendControl>(() => ({ status: extendStatus, run: runExtend }), [extendStatus, runExtend])
+
   const { signIn: hostSignIn, logout } = host
   const signIn = useCallback(() => {
     void hostSignIn()
@@ -139,6 +172,8 @@ export function AdminConsoleApp() {
         info={view.info}
         access={view.access}
         expiresAt={hostSession.expiresAt}
+        now={now}
+        extend={extend}
         forbidden={forbidden}
         onDismissForbidden={() => setForbidden(false)}
         onSignOut={logout}

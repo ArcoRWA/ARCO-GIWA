@@ -4,6 +4,7 @@ import { AlertCircle, CheckCircle2, Clock, Loader2, RefreshCw, Send, ShieldAlert
 import { giwaApi, type GiwaPriceHistoryPoint } from "./api"
 import { useAdminWriteAccess } from "./admin-context"
 import { useOnchainRole } from "./admin-roles"
+import { manualPostBlockedText } from "./price-bot-status"
 import type { AdminAuth } from "./api"
 import { GIWA_CHAIN_ID, GIWA_LIVE_REFETCH } from "./config"
 import { afterConfirmedReceipt, readPriceFeedState, readShareSupply, sendPreparedTransaction } from "./contracts"
@@ -31,6 +32,16 @@ export function PriceFeedAdminPanel({
   const { canWrite, readOnlyReason } = useAdminWriteAccess()
   // Posting is signed by the connected wallet; the feed checks FEED_ADMIN_ROLE itself.
   const feedRole = useOnchainRole(priceFeed ?? null, "FEED_ADMIN_ROLE", "price feed", walletAddress)
+  // Whether the price bot posts this product (its rates, from the Price bot card's query: same key, shared cache).
+  const priceBotQuery = useQuery({
+    queryKey: ["giwa", "admin", "price-bot"],
+    queryFn: () => giwaApi.admin.priceBot(auth),
+    enabled: auth.ready,
+    refetchInterval: 60_000,
+  })
+  const botPosts = Boolean(priceBotQuery.data?.rates.some((rate) => rate.productId === product.productId))
+  const roleBlocked =
+    feedRole.status === "missing" && walletAddress ? manualPostBlockedText({ symbol: product.symbol, wallet: walletAddress, botPosts }) : null
   const statusQuery = useQuery({
     queryKey: ["giwa", "price-feed", priceFeed],
     queryFn: () => readPriceFeedState(priceFeed as HexAddress),
@@ -112,6 +123,8 @@ export function PriceFeedAdminPanel({
     if (!priceFeed) return "No price feed deployed for this product"
     if (!auth.ready) return "Enter the operator token above"
     if (!canWrite) return readOnlyReason ?? "This operator cannot prepare price updates"
+    // Every feed write needs FEED_ADMIN_ROLE: say so before a click rather than after the wallet's simulation.
+    if (roleBlocked) return roleBlocked.short
     if (busy) return "A transaction is in progress"
     return null
   }
@@ -395,9 +408,9 @@ export function PriceFeedAdminPanel({
           Sign with connected wallet
         </button>
         {!walletAddress && <FieldNote>Connect the Tier 2 operator wallet to sign.</FieldNote>}
-        {feedRole.status === "missing" && (
+        {roleBlocked && (
           <p role="alert" className="mt-2 text-[11px] text-[var(--color-arco-down)]" data-testid="price-feed-role-missing">
-            {feedRole.message}
+            {roleBlocked.full}
           </p>
         )}
 

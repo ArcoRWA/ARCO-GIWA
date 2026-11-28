@@ -297,28 +297,43 @@ export function keeperTxBadge(status: NonNullable<GiwaArcoUSDKeeperReport["lastT
   return TX_STATUS[status] ?? { label: status, tone: "neutral" }
 }
 
-/** The last transaction's what: "tUSDC · paid 3", or "distribute · $7.99". */
+/** The keeper's ArcoGOLD distribute() transaction symbol (server keeper.ts GOLD_SYMBOL). */
+export const KEEPER_GOLD_SYMBOL = "ArcoGOLD"
+
+/** "0.0083 oz": the keeper's gold amounts are troy ounces (in its `amountUsd` field); up to 4 decimals, like the Gold page. */
+function keeperOunces(value: string | null | undefined): string {
+  const amount = Number(value)
+  if (value === null || value === undefined || value === "" || !Number.isFinite(amount)) return "—"
+  return `${amount.toLocaleString("en-US", { maximumFractionDigits: 4 })} oz`
+}
+
+/** The last transaction's what: "tUSDC · paid 3", "distribute · $7.99", or "ArcoGOLD distribute · 0.0083 oz". */
 export function keeperTxText(tx: NonNullable<GiwaArcoUSDKeeperReport["lastTx"]>): string {
+  if (tx.action === "distribute" && tx.symbol === KEEPER_GOLD_SYMBOL) return `ArcoGOLD distribute${tx.amountUsd ? ` · ${keeperOunces(tx.amountUsd)}` : ""}`
   if (tx.action === "distribute") return `distribute${tx.amountUsd ? ` · ${usdText(tx.amountUsd)}` : ""}`
   return `${tx.symbol}${tx.paid !== null ? ` · paid ${tx.paid}` : ""}`
 }
 
-/** The keeper's Savings step in words: "Due in 23h · $1.2 accrued", "Distributed $7.99", "Dry run: would distribute $3", … */
-export function keeperDistributeText(distribute: GiwaArcoUSDKeeperReport["distribute"], now: number): string {
+/**
+ * The keeper's Savings step in words: "Due in 23h · $1.2 accrued", "Distributed $7.99", "Dry run: would distribute $3", …
+ * `step: "gold"` reads the ArcoGOLD step: the keeper puts troy ounces in `amountUsd` there ("Distributed 0.0083 oz").
+ */
+export function keeperDistributeText(distribute: GiwaArcoUSDKeeperReport["distribute"], now: number, step: "savings" | "gold" = "savings"): string {
   if (!distribute) return "Not checked this round"
-  const amount = usdText(distribute.amountUsd)
+  const gold = step === "gold"
+  const amount = gold ? keeperOunces(distribute.amountUsd) : usdText(distribute.amountUsd)
   switch (distribute.state) {
     case "off":
-      return "Off (ARCOUSD_KEEPER_DISTRIBUTE=off): distribute from the Savings tab"
+      return gold ? "Off (ARCOUSD_KEEPER_DISTRIBUTE=off): distribute from the Gold page" : "Off (ARCOUSD_KEEPER_DISTRIBUTE=off): distribute from the Savings tab"
     case "not-deployed":
-      return "Savings is not deployed"
+      return gold ? "ArcoGOLD has no distributor" : "Savings is not deployed"
     case "waiting": {
       const at = distribute.nextAt ? Date.parse(distribute.nextAt) : Number.NaN
       const accrued = amount === "—" ? "" : ` · ${amount} accrued`
       return Number.isFinite(at) ? `Due in ${durationText(Math.max(0, (at - now) / 1000))}${accrued}` : `Waiting${accrued}`
     }
     case "nothing":
-      return "Due, nothing to distribute now (under $0.01)"
+      return gold ? "Due, nothing to distribute now (under 0.00001 oz)" : "Due, nothing to distribute now (under $0.01)"
     case "ready":
       return `${distribute.detail ?? "Ready"}: ${amount}`
     case "sent":

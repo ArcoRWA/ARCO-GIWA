@@ -127,11 +127,28 @@ test("Dynamic: switchNetwork; a chain it still does not know is added (injected 
   assert.equal(wagmiProvider.calls.length, 1)
 })
 
-test("callers that only fire the switch keep their behaviour (admin console, stocks host, product operation)", () => {
+test("every wallet write switches first: the product operation (Savings, product page, Convert), Mint; the admin console and the Stocks host unchanged", () => {
   const read = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8")
+  const hook = read("./useGiwaProductOperation.ts")
+  // One helper, from wallet-network.tsx.
+  assert.match(hook, /const ensureGiwa = useEnsureGiwa\(\)/)
+  // The modal flow (deposit, withdraw, invest, redeem, requests, conversions, with their approvals) switches first.
+  assert.match(hook, /void runOperationFlow\(\{\s*ensureNetwork,\s*network: \(pending\) => updateFlow\(id, \(current\) => \(\{ \.\.\.current, switchingNetwork: pending \}\)\),/)
+  // The writes outside the modal too: claims, the panel's own approve / submit / request buttons.
+  assert.match(hook, /void onGiwa\(\(\) => submitOperation\("claimRedeem", nextRequestId\)\)/)
+  assert.match(hook, /onApprove: \(\) => void onGiwa\(\(\) => approveDepositVault\(\)\)/)
+  assert.match(hook, /onSubmit: \(\) => void onGiwa\(\(\) => submitOperation\(\)\)/)
+  assert.match(hook, /onRequestRedeem: \(\) => void onGiwa\(\(\) => submitOperation\("requestRedeem"\)\)/)
+  assert.match(hook, /onSwitchNetwork: \(\) => void ensureNetwork\(\)/)
+  // Another network no longer holds the action back ("Switch to GIWA" / "Switch GIWA" on the panels' buttons).
+  assert.doesNotMatch(hook, /wallet\.phase === "wrong-network"/)
+  // Every page that writes uses this hook: Savings, the product page, the Convert screen.
+  for (const file of ["./SavingsPage.tsx", "./useGiwaVaultDetail.ts", "./ArcoUsdConvertScreen.tsx"]) assert.match(read(file), /useGiwaProductOperation\(/, file)
+  // Mint test assets: the same helper.
+  assert.match(read("./components.tsx"), /const ensured = await ensureGiwa\(\)/)
+  // Unchanged: the admin console keeps its own gate, the Stocks host its own switch command.
   assert.match(read("../../admin/AdminConsoleApp.tsx"), /switchNetwork: \(\) => void switchToGiwa\(\)\.catch\(\(\) => \{\}\)/)
   assert.match(read("./stocks-host/GiwaStocksHost.tsx"), /switchNetwork: \(\) => void switchToGiwa\(\)\.catch\(\(\) => \{\}\)/)
-  assert.match(read("./useGiwaProductOperation.ts"), /onSwitchNetwork: \(\) => void wallet\.switchToGiwa\(\)/)
   // The admin console keeps its own gate: the automatic request is the customer shell's only.
   assert.match(read("./GiwaPreprodApp.tsx"), /\{!admin && <GiwaAutoSwitch \/>\}/)
   assert.doesNotMatch(read("../../admin/AdminConsoleApp.tsx"), /GiwaAutoSwitch|useAutoSwitchToGiwa/)

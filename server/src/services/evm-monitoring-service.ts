@@ -16,6 +16,15 @@ import type { PrismaArcoService } from "./prisma-arco-service.js"
 const SHARE_FALLBACK_DECIMALS = 18
 const SPARKLINE_POINTS = 20
 
+// Depositor lists cost one balanceOf per distinct deposit recipient (hundreds per product,
+// growing weekly), and the Monitoring page refetches every 60 s. A list is reused for this
+// long per (chainId, product token) so repeat loads do not touch the chain. Failed reads
+// (null) are never cached, so a transient RPC error does not hide depositors.
+export const DEPOSITOR_CACHE_TTL_MS = 5 * 60 * 1000
+// Hard cap on cached depositor lists (one per product per chain; the registry has a
+// handful). Only reachable through unusual chainIds in the URL; oldest entry goes first.
+const DEPOSITOR_CACHE_MAX_ENTRIES = 64
+
 const FLOW_EVENT_NAMES = [
   "ProductDeposit",
   "ProductDepositRequested",
@@ -101,6 +110,9 @@ type RedemptionRow = {
 
 type RegistryProduct = GiwaDeploymentRegistry["products"][number]
 
+type DepositorRow = { readonly address: string; readonly balanceHuman: number }
+type TokenBalancesReader = (tokenAddress: string, addresses: string[]) => Promise<Record<string, string> | null>
+
 function argNumber(args: Record<string, unknown> | null | undefined, key: string): number {
   const value = Number((args ?? {})[key])
   return Number.isFinite(value) ? value : 0
@@ -130,9 +142,20 @@ export class EvmMonitoringService {
       market: Pick<EvmMarketService, "market" | "history">
       loadRegistry: () => GiwaDeploymentRegistry
       readShareSupply?: (tokenAddress: string) => Promise<{ supply: string; decimals: number } | null>
-      readTokenBalances?: (tokenAddress: string, addresses: string[]) => Promise<Record<string, string> | null>
+      readTokenBalances?: TokenBalancesReader
+      /** Milliseconds clock for the depositor cache; defaults to Date.now (tests inject one). */
+      now?: () => number
     },
   ) {}
+
+  private readonly depositorCache = new Map<string, { at: number; value: DepositorRow[] }>()
+  // Single flight: a computation already running for a key is awaited, not repeated.
+  private readonly depositorsInFlight = new Map<string, Promise<DepositorRow[] | null>>()
+  private readonly vaultsInFlight = new Map<number, Promise<{ vaults: MonitoringVaultEntry[] }>>()
+
+  private now(): number {
+    return (this.deps.now ?? Date.now)()
+  }
 
   private paymentDecimals(product: RegistryProduct): number {
     return PAYMENT_DECIMALS[product.paymentAssetSymbol] ?? SHARE_FALLBACK_DECIMALS
@@ -212,9 +235,53 @@ export class EvmMonitoringService {
   // Distinct deposit recipients confirmed by a current on-chain balance > 0. Wallets that
   // only received tokens via plain ERC20 transfers are not seen here (Transfer events are
   // not indexed) — v2 alongside block timestamps.
-  private async depositors(chainId: number, product: RegistryProduct) {
-    if (!this.deps.readTokenBalances || !product.productToken.proxy) return null
-    const events = await this.flowEvents(chainId, product)
+  // `events` are the product's flow events, already read by the caller (read once per call).
+  // Served from a DEPOSITOR_CACHE_TTL_MS cache per (chainId, product token), single-flight.
+  private async depositors(
+    chainId: number,
+    product: RegistryProduct,
+    events: IndexedEventRow[],
+  ): Promise<DepositorRow[] | null> {
+    const readTokenBalances = this.deps.readTokenBalances
+    const token = product.productToken.proxy
+    if (!readTokenBalances || !token) return null
+    const key = `${chainId}:${token.toLowerCase()}`
+    const cached = this.depositorCache.get(key)
+    if (cached && this.now() - cached.at < DEPOSITOR_CACHE_TTL_MS) return cached.value
+    const running = this.depositorsInFlight.get(key)
+    if (running) return running
+    const computation = (async () => {
+      try {
+        const value = await this.readDepositors(readTokenBalances, token, events)
+        if (value) this.storeDepositors(key, value)
+        return value
+      } finally {
+        this.depositorsInFlight.delete(key)
+      }
+    })()
+    this.depositorsInFlight.set(key, computation)
+    return computation
+  }
+
+  private storeDepositors(key: string, value: DepositorRow[]) {
+    const now = this.now()
+    for (const [cachedKey, entry] of this.depositorCache) {
+      if (now - entry.at >= DEPOSITOR_CACHE_TTL_MS) this.depositorCache.delete(cachedKey)
+    }
+    this.depositorCache.delete(key)
+    while (this.depositorCache.size >= DEPOSITOR_CACHE_MAX_ENTRIES) {
+      const oldest = this.depositorCache.keys().next().value
+      if (oldest === undefined) break
+      this.depositorCache.delete(oldest)
+    }
+    this.depositorCache.set(key, { at: now, value })
+  }
+
+  private async readDepositors(
+    readTokenBalances: TokenBalancesReader,
+    token: string,
+    events: IndexedEventRow[],
+  ): Promise<DepositorRow[] | null> {
     const candidates = new Set<string>()
     for (const event of events) {
       if (event.eventName !== "ProductDeposit" && event.eventName !== "ProductDepositFulfilled") continue
@@ -222,7 +289,7 @@ export class EvmMonitoringService {
       if (typeof recipient === "string" && recipient) candidates.add(recipient.toLowerCase())
     }
     if (!candidates.size) return []
-    const balances = await this.deps.readTokenBalances(product.productToken.proxy, [...candidates])
+    const balances = await readTokenBalances(token, [...candidates])
     if (!balances) return null
     return Object.entries(balances)
       .map(([address, balance]) => ({ address, balanceHuman: Number(balance) / 10 ** SHARE_FALLBACK_DECIMALS }))
@@ -301,7 +368,16 @@ export class EvmMonitoringService {
     }
   }
 
+  // Single flight per chainId: overlapping /vaults requests share one computation.
   async vaults(chainId: number): Promise<{ vaults: MonitoringVaultEntry[] }> {
+    const running = this.vaultsInFlight.get(chainId)
+    if (running) return running
+    const computation = this.computeVaults(chainId).finally(() => this.vaultsInFlight.delete(chainId))
+    this.vaultsInFlight.set(chainId, computation)
+    return computation
+  }
+
+  private async computeVaults(chainId: number): Promise<{ vaults: MonitoringVaultEntry[] }> {
     const registry = this.deps.loadRegistry()
     const entries = await this.deps.market.market(chainId)
     const byProduct = new Map(entries.map((entry) => [entry.productId, entry]))
@@ -331,7 +407,7 @@ export class EvmMonitoringService {
         const events = await this.flowEvents(chainId, product)
         const { netDeposit } = this.flowSeries(events, this.paymentDecimals(product))
         const apyTrend = await this.apyTrend(chainId, product.productId)
-        const depositors = await this.depositors(chainId, product)
+        const depositors = await this.depositors(chainId, product, events)
 
         return {
           productId: product.productId,
@@ -391,7 +467,7 @@ export class EvmMonitoringService {
       }
     }
 
-    const depositors = (await this.depositors(chainId, product)) ?? []
+    const depositors = (await this.depositors(chainId, product, events)) ?? []
     const requesters = requests
       .filter((row) => isPending(row.status))
       .map((row) => ({

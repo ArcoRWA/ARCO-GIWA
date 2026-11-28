@@ -4,6 +4,7 @@ import { createBrowserRouter, Navigate, RouterProvider } from "react-router-dom"
 import { DemoPresentationContext } from "../demo/giwa/demo-presentation"
 import { GiwaPreprodProviders } from "../demo/giwa/providers"
 import { AdminConsoleApp } from "./AdminConsoleApp"
+import { ADMIN_SESSION_MAX_MS } from "./console-model"
 import { StocksRoute } from "./StocksSection"
 import { VaultsLayout } from "./VaultsSection"
 import "../index.css"
@@ -48,7 +49,8 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     {/* Operators see the full technical detail (no customer presentation mode). */}
     <DemoPresentationContext.Provider value={false}>
-      <GiwaPreprodProviders>
+      {/* Operator sessions may last up to 60 minutes (the server decides: ADMIN_SESSION_ORIGINS). */}
+      <GiwaPreprodProviders stocksSessionMaxMs={ADMIN_SESSION_MAX_MS}>
         <RouterProvider router={router} />
       </GiwaPreprodProviders>
     </DemoPresentationContext.Provider>

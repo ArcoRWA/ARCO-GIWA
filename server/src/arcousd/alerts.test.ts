@@ -24,7 +24,7 @@ import type { RecallView } from "./recall.js"
 import type { ArcoUSDRegistryFile } from "./registry.js"
 import { safeErrorText } from "./safe-error.js"
 import type { SavingsState } from "./savings.js"
-import { evaluateWatch, SAVINGS_NO_YIELD_MS, SAVINGS_OVERDUE_MS, type Finding, type SavingsSeen, type WatchInput } from "./watch.js"
+import { evaluateWatch, PRICE_BOT_STALE_MIN_MS, SAVINGS_NO_YIELD_MS, SAVINGS_OVERDUE_MS, type Finding, type SavingsSeen, type WatchInput } from "./watch.js"
 import { ArcoUSDWatcher } from "./watcher.js"
 
 const A = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as `0x${string}`
@@ -1009,6 +1009,88 @@ test("watcher: the keeper heartbeat feeds its rules; an unreadable one keeps kee
   }
   await watcher.runOnce()
   assert.equal(store.rows.get("keeper:stale")?.status, "OPEN")
+})
+
+// ─────────────────────────────── fund price bot health ───────────────────────────────
+
+test("rules: the fund price bot's health (nothing while it is off or has never run)", () => {
+  const BOT = A(0xb0)
+  const seen = (over: Record<string, unknown>, beat: Partial<{ lastRunAt: Date; lastOkAt: Date | null; lastError: string | null }> = {}) => ({
+    lastRunAt: new Date(NOW - 5 * MIN),
+    lastOkAt: new Date(NOW - 5 * MIN),
+    lastError: null,
+    ...beat,
+    report: { mode: "live", intervalMs: 600_000, ok: true, error: null, address: BOT, balanceWei: "10000000000000000", lowGasWei: "5000000000000000", lowGas: false, ...over },
+  })
+  assert.deepEqual(evaluateWatch(input({ priceBot: null })), [])
+  assert.deepEqual(evaluateWatch(input({ priceBot: seen({}) })), [])
+  assert.deepEqual(evaluateWatch(input({ priceBot: seen({ mode: "off", ok: false, lowGas: true }, { lastRunAt: new Date(NOW - 5 * HOUR) }) })), [])
+
+  // Stale: silent for longer than max(30 minutes, 3 rounds). A 10-minute bot: 30 minutes; a 1-hour bot: 3 hours.
+  assert.deepEqual(keys(evaluateWatch(input({ priceBot: seen({}, { lastRunAt: new Date(NOW - PRICE_BOT_STALE_MIN_MS) }) }))), [])
+  const stale = evaluateWatch(input({ priceBot: seen({ ok: false, error: "x", lowGas: true }, { lastRunAt: new Date(NOW - 31 * MIN), lastError: "x" }) }))
+  assert.deepEqual(keys(stale), ["price-bot:stale"]) // older readings are not judged
+  assert.deepEqual([find(stale, "price-bot:stale").severity, find(stale, "price-bot:stale").sustainMs], ["WARNING", 0])
+  assert.match(find(stale, "price-bot:stale").detail, /The live price bot last reported 31m ago/)
+  assert.deepEqual(keys(evaluateWatch(input({ priceBot: seen({ intervalMs: 3_600_000 }, { lastRunAt: new Date(NOW - 2 * HOUR) }) }))), [])
+  assert.deepEqual(keys(evaluateWatch(input({ priceBot: seen({ intervalMs: 3_600_000 }, { lastRunAt: new Date(NOW - 3 * HOUR - MIN) }) }))), ["price-bot:stale"])
+  // A report without the interval: 30 minutes.
+  assert.deepEqual(keys(evaluateWatch(input({ priceBot: seen({ intervalMs: undefined, mode: "dry-run" }, { lastRunAt: new Date(NOW - 31 * MIN) }) }))), ["price-bot:stale"])
+
+  // Failing: the last round reported an error (dry-run too).
+  const failing = find(
+    evaluateWatch(input({ priceBot: seen({ mode: "dry-run", ok: false, error: "HOME: The post would revert: PPF: deviation" }, { lastError: "HOME: The post would revert: PPF: deviation" }) })),
+    "price-bot:failing",
+  )
+  assert.deepEqual([failing.severity, failing.detail], ["WARNING", "The last price bot round failed: HOME: The post would revert: PPF: deviation"])
+  assert.deepEqual(keys(evaluateWatch(input({ priceBot: seen({}, { lastError: "rpc down" }) }))), ["price-bot:failing"])
+
+  // Low gas: live only; the report's own flag, or 0.005 ETH for a report from an older bot without one.
+  const gas = find(evaluateWatch(input({ priceBot: seen({ lowGas: true, balanceWei: "4200000000000000" }) })), "price-bot:low-gas")
+  assert.equal(gas.detail, `The price bot wallet ${BOT} holds 0.0042 ETH (warns below 0.005 ETH). Send GIWA Sepolia ETH to ${BOT} so the daily prices keep posting.`)
+  assert.deepEqual(keys(evaluateWatch(input({ priceBot: seen({ mode: "dry-run", lowGas: true, balanceWei: "1" }) }))), []) // dry-run spends no gas
+  const custom = find(evaluateWatch(input({ priceBot: seen({ lowGas: true, balanceWei: "15000000000000000", lowGasWei: "20000000000000000" }) })), "price-bot:low-gas")
+  assert.match(custom.detail, /holds 0\.015 ETH \(warns below 0\.02 ETH\)/)
+  const old = (balanceWei: string) => seen({ lowGas: undefined, lowGasWei: undefined, balanceWei })
+  assert.deepEqual(keys(evaluateWatch(input({ priceBot: old("4999999999999999") }))), ["price-bot:low-gas"])
+  assert.match(find(evaluateWatch(input({ priceBot: old("4999999999999999") })), "price-bot:low-gas").detail, /warns below 0\.005 ETH/)
+  assert.deepEqual(keys(evaluateWatch(input({ priceBot: old("5000000000000000") }))), [])
+  assert.deepEqual(keys(evaluateWatch(input({ priceBot: seen({ lowGas: null, balanceWei: null }) }))), []) // balance not read
+})
+
+test("watcher: the price bot heartbeat feeds its rules; an unreadable one keeps its alerts as they were", async () => {
+  let now = NOW
+  const { watcher, store } = watcherWith({ now: () => now })
+  await watcher.runOnce()
+  assert.equal([...store.rows.keys()].some((key) => key.startsWith("price-bot:")), false) // never ran: nothing
+  await store.beat(91342, "fund-price-bot", { at: new Date(NOW - HOUR), ok: true, data: { mode: "live", intervalMs: 600_000, address: A(0xb0), balanceWei: "1" } })
+  now += MIN
+  await watcher.runOnce()
+  assert.equal(store.rows.get("price-bot:stale")?.status, "OPEN")
+  now += MIN
+  const heartbeat = store.heartbeat.bind(store)
+  store.heartbeat = async (chainId: number, name: string) => {
+    if (name === "fund-price-bot") throw new Error("db down")
+    return heartbeat(chainId, name)
+  }
+  await watcher.runOnce()
+  assert.equal(store.rows.get("price-bot:stale")?.status, "OPEN") // unknown this round, not resolved
+  store.heartbeat = heartbeat
+  // Switched off: the launcher records an off round, and the alert resolves.
+  await store.beat(91342, "fund-price-bot", { at: new Date(now), ok: true, data: { mode: "off", intervalMs: 600_000 } })
+  now += MIN
+  await watcher.runOnce()
+  assert.equal(store.rows.get("price-bot:stale")?.status, "RESOLVED")
+  // A live round with an error and a nearly empty wallet (no threshold in the report: 0.005 ETH).
+  await store.beat(91342, "fund-price-bot", {
+    at: new Date(now),
+    ok: false,
+    error: "Not sent: the bot wallet has too little ETH for gas",
+    data: { mode: "live", intervalMs: 600_000, ok: false, error: "Not sent: the bot wallet has too little ETH for gas", address: A(0xb0), balanceWei: "1000" },
+  })
+  now += MIN
+  await watcher.runOnce()
+  assert.deepEqual([store.rows.get("price-bot:failing")?.status, store.rows.get("price-bot:low-gas")?.status], ["OPEN", "OPEN"])
 })
 
 test("console keeper view: never run, stale, and its report", async () => {

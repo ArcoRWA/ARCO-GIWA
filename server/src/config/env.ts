@@ -32,6 +32,10 @@ export type ServerEnv = {
   readonly adminOperators: readonly AdminOperator[]
   /** ADMIN_WITHDRAW_ALLOWLIST (lowercased): extra withdrawTo recipients beyond each product's adminDepositAddress. */
   readonly adminWithdrawAllowlist: readonly string[]
+  /** ADMIN_SESSION_ORIGINS: admin console origins (each also in CORS_ALLOWED_ORIGINS) whose sessions last 60 minutes. */
+  readonly adminSessionOrigins: readonly string[]
+  /** ADMIN_SESSION_ORIGINS entries left out (not an http(s) origin, or not in CORS_ALLOWED_ORIGINS); the server warns at startup. */
+  readonly adminSessionOriginsIgnored: readonly string[]
   readonly giwaChainId: number
   readonly indexerConfirmations: number
   readonly indexerMaxBlockRange: bigint
@@ -51,6 +55,35 @@ export function assertNoWildcardCors(origins: readonly string[]): void {
   if (origins.includes("*")) {
     throw new Error("CORS_ALLOWED_ORIGINS must be explicit; '*' is not allowed")
   }
+}
+
+/**
+ * ADMIN_SESSION_ORIGINS: comma-separated admin console origins (e.g. https://admin.arco.financial).
+ * An entry counts only if it is an exact http(s) origin AND listed in CORS_ALLOWED_ORIGINS; any other
+ * entry is ignored (returned in `ignored` so startup can warn) and never throws. Unset or empty: none,
+ * so every session lasts 15 minutes as before.
+ */
+export function parseAdminSessionOrigins(
+  value: string | undefined,
+  corsAllowedOrigins: readonly string[],
+): { origins: string[]; ignored: string[] } {
+  const origins: string[] = []
+  const ignored: string[] = []
+  for (const entry of parseCorsAllowedOrigins(value)) {
+    let origin: string | null = null
+    try {
+      const url = new URL(entry)
+      if ((url.protocol === "https:" || url.protocol === "http:") && url.origin === entry) origin = url.origin
+    } catch {
+      origin = null
+    }
+    if (origin && corsAllowedOrigins.includes(origin)) {
+      if (!origins.includes(origin)) origins.push(origin)
+    } else {
+      ignored.push(entry)
+    }
+  }
+  return { origins, ignored }
 }
 
 export function validateServerEnv(env: NodeJS.ProcessEnv): ServerEnv {
@@ -88,6 +121,7 @@ export function validateServerEnv(env: NodeJS.ProcessEnv): ServerEnv {
 
   const corsAllowedOrigins = parseCorsAllowedOrigins(env.CORS_ALLOWED_ORIGINS)
   assertNoWildcardCors(corsAllowedOrigins)
+  const adminSession = parseAdminSessionOrigins(env.ADMIN_SESSION_ORIGINS, corsAllowedOrigins)
 
   const authNonceTtlSeconds = Number(env.AUTH_NONCE_TTL_SECONDS ?? "300")
   if (!Number.isInteger(authNonceTtlSeconds) || authNonceTtlSeconds <= 0 || authNonceTtlSeconds > 300) {
@@ -122,6 +156,8 @@ export function validateServerEnv(env: NodeJS.ProcessEnv): ServerEnv {
     adminLegacyTokenAuth,
     adminOperators,
     adminWithdrawAllowlist,
+    adminSessionOrigins: adminSession.origins,
+    adminSessionOriginsIgnored: adminSession.ignored,
     giwaChainId,
     indexerConfirmations,
     indexerMaxBlockRange,

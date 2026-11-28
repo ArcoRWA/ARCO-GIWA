@@ -9,14 +9,15 @@ import { deployedArcoUSD, type ArcoUSDRegistryFile, type DeployedArcoUSD, type D
 import { safeErrorText } from "./safe-error.js"
 import type { SavingsChainReader, SavingsState } from "./savings.js"
 import { evaluateBuyGate } from "./service.js"
-import { evaluateWatch, payoutsPaused, type Finding, type KeeperSeen, type SavingsSeen } from "./watch.js"
+import { PRICE_BOT_HEARTBEAT } from "../funds/price-bot.js"
+import { evaluateWatch, payoutsPaused, type Finding, type KeeperSeen, type PriceBotSeen, type SavingsSeen } from "./watch.js"
 
 // The ArcoUSD watcher (docs/operations/arcousd-alerts.md). Runs inside the indexer worker, after the
 // ArcoUSD indexer's poll, once per ARCOUSD_ALERT_INTERVAL_MS. Each round:
 //   1. reads the Reserve AT THE INDEXER'S LAST BLOCK when the indexer is close to the head and its
 //      poll just completed, so the chain and the indexed queue describe the same moment (else at the
 //      head, and the queue is not reconciled this round);
-//   2. reads the indexed queue, the last snapshot time, the Reserve recalls, the keeper's heartbeat and,
+//   2. reads the indexed queue, the last snapshot time, the Reserve recalls, the keeper's and the fund price bot's heartbeats and,
 //      once deployed, Savings (sArcoUSD, its distributor, the savings indexer's cursor and snapshots);
 //   3. evaluates the rules (watch.ts), steps the alert book (alerts.ts), sends one digest to every
 //      configured channel, saves the rows and a heartbeat.
@@ -267,6 +268,21 @@ export class ArcoUSDWatcher {
     } catch {
       keeperRead = false
     }
+    let priceBot: PriceBotSeen | null = null
+    let priceBotRead = true
+    try {
+      const beat = await this.deps.store.heartbeat(this.deps.chainId, PRICE_BOT_HEARTBEAT)
+      priceBot = beat
+        ? {
+            lastRunAt: beat.lastRunAt,
+            lastOkAt: beat.lastOkAt,
+            lastError: beat.lastError,
+            report: (beat.data && typeof beat.data === "object" && !Array.isArray(beat.data) ? beat.data : null) as PriceBotSeen["report"],
+          }
+        : null
+    } catch {
+      priceBotRead = false
+    }
 
     const savingsRead = deployment.savings && this.deps.savings ? await this.readSavings(deployment.savings, latest) : null
 
@@ -290,6 +306,7 @@ export class ArcoUSDWatcher {
       lastSnapshotAt,
       recalls: readRecalls,
       keeper,
+      priceBot,
       savings: savingsRead?.seen ?? null,
     })
 
@@ -311,6 +328,7 @@ export class ArcoUSDWatcher {
     if (!snapshotRead || lastSnapshotAt === null) unknown.push(matches(/^indexer:snapshots$/))
     if (lagBlocks === null) unknown.push(matches(/^indexer:lag$/))
     if (!keeperRead) unknown.push(matches(/^keeper:/))
+    if (!priceBotRead) unknown.push(matches(/^price-bot:/))
     if (savingsRead) {
       const { seen, cursorRead, snapshotRead: savingsSnapshotRead } = savingsRead
       if (!seen.state) unknown.push(matches(/^savings:(?!read-failed$|indexer-lag$|snapshots$)/))

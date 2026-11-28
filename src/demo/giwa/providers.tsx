@@ -22,7 +22,8 @@ const giwaWagmiConfig = createConfig({
   },
 })
 
-export function GiwaPreprodProviders({ children }: { children: ReactNode }) {
+/** stocksSessionMaxMs: the longest wallet session the host accepts (default 15 minutes; the admin console passes 60). */
+export function GiwaPreprodProviders({ children, stocksSessionMaxMs }: { children: ReactNode; stocksSessionMaxMs?: number }) {
   const queryClient = useMemo(
     () =>
       new QueryClient({
@@ -53,7 +54,7 @@ export function GiwaPreprodProviders({ children }: { children: ReactNode }) {
           <WagmiProvider config={giwaWagmiConfig}>
             <QueryClientProvider client={queryClient}>
               <DynamicWagmiConnector suppressChainMismatchError>
-                <DynamicGiwaWalletProvider><GiwaStocksHost>{children}</GiwaStocksHost></DynamicGiwaWalletProvider>
+                <DynamicGiwaWalletProvider><GiwaStocksHost maxSessionMs={stocksSessionMaxMs}>{children}</GiwaStocksHost></DynamicGiwaWalletProvider>
               </DynamicWagmiConnector>
             </QueryClientProvider>
           </WagmiProvider>
@@ -65,7 +66,7 @@ export function GiwaPreprodProviders({ children }: { children: ReactNode }) {
   return (
     <GiwaProviderBoundary dynamicEnabled={false}>
       <QueryClientProvider client={queryClient}>
-        <GiwaWalletProvider><GiwaStocksHost>{children}</GiwaStocksHost></GiwaWalletProvider>
+        <GiwaWalletProvider><GiwaStocksHost maxSessionMs={stocksSessionMaxMs}>{children}</GiwaStocksHost></GiwaWalletProvider>
       </QueryClientProvider>
     </GiwaProviderBoundary>
   )

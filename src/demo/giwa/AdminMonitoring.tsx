@@ -12,6 +12,7 @@ import {
 } from "./api"
 import { GIWA_CHAIN_ID } from "./config"
 import { useGiwaAdmin } from "./admin-context"
+import { AutomationSection } from "./AutomationCard"
 import { explorerAddress } from "./wallet"
 
 // v1 monitoring: aggregated on-the-fly from indexed events (no snapshots). Deposit/redeem
@@ -106,6 +107,9 @@ export function MonitoringView({
         </Card>
       ) : (
         <>
+          {/* ── Automation: the jobs that run by themselves ────────────────── */}
+          <AutomationSection />
+
           {/* ── 4a Totals ─────────────────────────────────────────────────── */}
           <section className="grid gap-3 md:grid-cols-3">
             <TotalCard

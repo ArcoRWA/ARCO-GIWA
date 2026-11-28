@@ -94,6 +94,20 @@ export function accessOf(info: AdminSessionInfo): ConsoleAccess {
   }
 }
 
+/**
+ * What this sign-in may do in the console, in plain words, from the server's answer only: "Vault operator" (vault:write),
+ * "Vaults read-only" (vault:read alone), "Stocks operator" (stocks:control), "Stocks read-only" (stocks:read alone).
+ * Console permissions, not contract roles: an on-chain action also needs the wallet's own role on that contract.
+ */
+export function accessRoles(access: ConsoleAccess): string[] {
+  const roles: string[] = []
+  if (access.vaultWrite) roles.push("Vault operator")
+  else if (access.vaultRead) roles.push("Vaults read-only")
+  if (access.stocksControl) roles.push("Stocks operator")
+  else if (access.stocksRead) roles.push("Stocks read-only")
+  return roles
+}
+
 /** Every page of a group reads first, so a group is offered only with its read permission. */
 export function groupVisible(access: ConsoleAccess, group: ConsoleGroup): boolean {
   return group === "vaults" ? access.vaultRead : access.stocksRead
@@ -192,4 +206,24 @@ export function signInFailureText(code: string): string {
     default:
       return `Sign-in failed (${code}).`
   }
+}
+
+// ── Session length ─────────────────────────────────────────────────────────
+
+/**
+ * The longest operator session the console accepts: 60 minutes, what the server issues for an origin in
+ * ADMIN_SESSION_ORIGINS. A server without that setting issues 15 minutes, and the console's session then
+ * ends at 15 (the session's end always comes from the server's token).
+ */
+export const ADMIN_SESSION_MAX_MS = 3_600_000
+/** In the last 5 minutes of a session the header offers "Extend session". */
+export const EXTEND_WINDOW_MS = 300_000
+
+/** Whole minutes left, rounded up (0 once ended): 41m01s → 42. */
+export function minutesLeft(expiresAt: number, now: number): number {
+  return Number.isFinite(expiresAt) && Number.isFinite(now) ? Math.max(0, Math.ceil((expiresAt - now) / 60_000)) : 0
+}
+
+export function inExtendWindow(expiresAt: number, now: number): boolean {
+  return Number.isFinite(expiresAt) && Number.isFinite(now) && expiresAt > now && expiresAt - now <= EXTEND_WINDOW_MS
 }

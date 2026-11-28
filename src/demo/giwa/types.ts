@@ -687,6 +687,9 @@ export type GiwaPriceBotStatus = {
       error?: string | null
       sent?: number
       balanceWei?: string | null
+      /** Below it the wallet is low on gas. Absent in reports from bots before 2026-11. */
+      lowGasWei?: string
+      lowGas?: boolean | null
       funds?: GiwaPriceBotFund[]
     }
   }
@@ -801,6 +804,10 @@ export type GiwaArcoUSDKeeperReport = {
   distribute?: GiwaArcoUSDKeeperDistribute | null
   /** No distribute() until then, after a reverted one. */
   distributeHoldUntil?: string | null
+  /** The ArcoGOLD step (absent from keepers before ArcoGOLD; null without a gold distributor or when the round stopped
+   *  before it). Its `amountUsd` is in troy ounces. */
+  goldDistribute?: GiwaArcoUSDKeeperDistribute | null
+  goldDistributeHoldUntil?: string | null
   note: string | null
 }
 

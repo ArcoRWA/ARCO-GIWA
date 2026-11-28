@@ -91,7 +91,12 @@ async function setUpPriceBot({ args, client, store }) {
       process.stderr.write(`FUND_PRICE_BOT_CONFIG_INVALID ${config.invalid.join(',')}\n`);
       throw Error('CONFIG_INVALID');
     }
-    if (config.mode === 'off') return null;
+    if (config.mode === 'off') {
+      // One "off" heartbeat, so a bot switched off after running is not reported as stopped (watcher, console).
+      // An off round reads nothing and signs nothing; tick() never throws.
+      if (store) await new FundPriceBot({ chainId: GIWA_CHAIN_ID, config, loadFunds: () => [], rpc: viemPriceBotRpc(client), signer: null, store }).tick();
+      return null;
+    }
     const loadFunds = () => priceBotFunds(readRegistryFile());
     botStage = 'REGISTRY';
     const funds = loadFunds();

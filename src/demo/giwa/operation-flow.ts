@@ -46,7 +46,12 @@ export type OperationFlow = Readonly<{
   outcome: OperationOutcome | null
   /** False once the user closed the modal: nothing more is shown, and no new wallet request starts. */
   open: boolean
+  /** The wallet has the network switch to GIWA (ensureGiwa) before the first step's request. */
+  switchingNetwork?: boolean
 }>
+
+/** The first step's wallet line while the wallet has the network switch (wallet-network.tsx NETWORK_COPY.approve). */
+export const NETWORK_SWITCH_LINE = "Approve the network switch in your wallet app."
 
 export function initialOperationSteps(withApproval: boolean): OperationFlowStep[] {
   return withApproval
@@ -76,7 +81,16 @@ export function displayAmount(value: string, maxDecimals = 6): string {
 
 export type StepOutcome = Readonly<{ ok: true; hash: string; received?: string | null }> | Readonly<{ ok: false; message: string }>
 
+export type NetworkOutcome = Readonly<{ ok: true }> | Readonly<{ ok: false; message: string }>
+
 export type OperationFlowDriver = Readonly<{
+  /**
+   * Puts the wallet on GIWA first (ensureGiwa: nothing when it is already there; else the switch, then a wait until the
+   * app can sign there). A failure or a rejection ends the flow at the first step, with its message, before any request.
+   */
+  ensureNetwork?: () => Promise<NetworkOutcome>
+  /** Whether the wallet has the network switch (the first step shows the switch line meanwhile). */
+  network?: (pending: boolean) => void
   /** The approval, or null when the vault can already take the amount. `onSent` fires once the wallet sent it. */
   approve: ((onSent: () => void) => Promise<StepOutcome>) | null
   submit: (onSent: () => void) => Promise<StepOutcome>
@@ -93,6 +107,17 @@ export type OperationFlowDriver = Readonly<{
  * Closing the modal lets a transaction already sent finish, but starts no new wallet request.
  */
 export async function runOperationFlow(driver: OperationFlowDriver): Promise<void> {
+  if (driver.ensureNetwork) {
+    driver.network?.(true)
+    const network = await driver.ensureNetwork()
+    driver.network?.(false)
+    if (!network.ok) {
+      driver.step(driver.approve !== null ? "approve" : "submit", "failed")
+      driver.finish({ kind: "failed", message: network.message })
+      return
+    }
+    if (driver.stopped()) return
+  }
   if (driver.approve !== null) {
     const approved = await driver.approve(() => driver.step("approve", "processing"))
     if (!approved.ok) {
@@ -218,7 +243,7 @@ export function operationFlowView(flow: OperationFlow): OperationFlowView {
       ? {
           id: step.id,
           label: `Approve ${pay}`,
-          walletLabel: `Approve ${pay} in your wallet`,
+          walletLabel: flow.switchingNetwork && step.state === "wallet" ? NETWORK_SWITCH_LINE : `Approve ${pay} in your wallet`,
           processingLabel: `Approving ${pay}…`,
           hint: step.state === "processing" ? "Waiting for GIWA to confirm the approval." : null,
           help: { question: "Why do I have to approve?", answer: `Approving lets this ${place} take ${pay} from your wallet. You only do this once.` },
@@ -228,7 +253,7 @@ export function operationFlowView(flow: OperationFlow): OperationFlowView {
       : {
           id: step.id,
           label: words.confirm,
-          walletLabel: `${words.confirm} in your wallet`,
+          walletLabel: flow.switchingNetwork && step.state === "wallet" ? NETWORK_SWITCH_LINE : `${words.confirm} in your wallet`,
           processingLabel: words.pending,
           hint: step.state === "processing" ? "Waiting for GIWA to confirm your transaction." : null,
           help: null,
